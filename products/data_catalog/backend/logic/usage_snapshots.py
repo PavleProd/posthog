@@ -20,6 +20,7 @@ from posthog.dataclasses import frozen
 from posthog.models import Team, User
 
 from products.access_control.backend.facade.user_access_control import UserAccessControl
+from products.product_analytics.backend.facade.api import viewable_insight_definitions
 
 from ..facade.contracts import (
     MetricUsage,
@@ -79,6 +80,10 @@ class UsageReader:
 
     visible_metric_ids: frozenset[UUID]
     denied_tables: frozenset[str]
+    # Without a person, the per-chart access check is skipped.
+    team: Team | None = None
+    user: User | None = None
+    user_access_control: UserAccessControl | None = None
 
 
 def usage_reader(team: Team, user: User, user_access_control: UserAccessControl) -> UsageReader:
@@ -87,6 +92,9 @@ def usage_reader(team: Team, user: User, user_access_control: UserAccessControl)
             metrics_visible_to_user(team, user, user_access_control).values_list("id", flat=True)
         ),
         denied_tables=frozenset(_denied_tables(team, user, user_access_control)),
+        team=team,
+        user=user,
+        user_access_control=user_access_control,
     )
 
 
@@ -119,6 +127,22 @@ def visible_payload(payload: UsageSnapshotPayload, reader: UsageReader) -> Usage
             for source in payload.table_sources
             if not references_denied_table([source.name], set(reader.denied_tables))
         ],
+        uncovered=None
+        if payload.uncovered is None
+        else [
+            group
+            for group in payload.uncovered
+            if (group.matched_metric_id is None or group.matched_metric_id in reader.visible_metric_ids)
+            and not sql_reads_denied_table(group.sample_sql, reader.denied_tables)
+            and not (group.draft_definition and sql_reads_denied_table(group.draft_definition, reader.denied_tables))
+        ],
+        proposed_metrics=None
+        if payload.proposed_metrics is None
+        else [
+            proposal
+            for proposal in payload.proposed_metrics
+            if not sql_reads_denied_table(proposal.definition, reader.denied_tables)
+        ],
         adjusted_runs=None
         if payload.adjusted_runs is None
         else [
@@ -134,7 +158,32 @@ def latest_usage_snapshot(team_id: int, reader: UsageReader) -> UsageSnapshotDet
     if row is None:
         return None
     detail = _detail(row)
-    return dataclasses.replace(detail, payload=visible_payload(detail.payload, reader))
+    payload = _viewable_charts(visible_payload(detail.payload, reader), reader)
+    return dataclasses.replace(detail, payload=payload)
+
+
+def _viewable_charts(payload: UsageSnapshotPayload, reader: UsageReader) -> UsageSnapshotPayload:
+    """Keep only the charts the reader may open, and dashboard names only for a reader who may see dashboards."""
+    access = reader.user_access_control
+    if access is None or reader.team is None or reader.user is None or not payload.proposed_metrics:
+        return payload
+    short_ids = {chart.insight_short_id for proposal in payload.proposed_metrics for chart in proposal.charts}
+    viewable = set(viewable_insight_definitions(team=reader.team, user=reader.user, short_ids=short_ids))
+    sees_dashboards = access.check_access_level_for_resource("dashboard", "viewer")
+    return dataclasses.replace(
+        payload,
+        proposed_metrics=[
+            dataclasses.replace(
+                proposal,
+                charts=[
+                    chart if sees_dashboards else dataclasses.replace(chart, dashboard_id=None, dashboard_name=None)
+                    for chart in proposal.charts
+                    if chart.insight_short_id in viewable
+                ],
+            )
+            for proposal in payload.proposed_metrics
+        ],
+    )
 
 
 def metric_usage(team_id: int, metric_id: UUID, reader: UsageReader) -> MetricUsage | None:
