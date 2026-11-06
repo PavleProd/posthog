@@ -136,9 +136,8 @@ export function ActionStep({
                                     }
                                 >
                                     Feature flag called is moving out of the events table. Once your organization starts
-                                    the move, you can't add new steps on it. When the move finishes, this step stops
-                                    matching new flag calls. To see how a flag is used, open the flag and check its
-                                    Usage tab.
+                                    the move, you can't add new steps on it. To see how a flag is used, open the flag
+                                    and check its Usage tab.
                                 </LemonBanner>
                             )}
 

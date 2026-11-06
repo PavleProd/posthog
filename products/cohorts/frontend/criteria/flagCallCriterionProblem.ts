@@ -1,7 +1,9 @@
 import { isEventPropertyFilter } from 'lib/components/PropertyFilters/utils'
 import { TaxonomicFilterGroupType } from 'lib/components/TaxonomicFilter/types'
+import { isCohortCriteriaGroup } from 'scenes/cohorts/cohortUtils'
+import { FEATURE_FLAG_CALLED_EVENT } from 'scenes/feature-flags/flagEvaluationsTable'
 
-import { AnyCohortCriteriaType, BehavioralEventType } from '~/types'
+import { AnyCohortCriteriaType, BehavioralEventType, CohortCriteriaGroupFilter, CohortType } from '~/types'
 
 // The criterion types the cohorts API accepts on an event hidden in query builders. "Did not complete
 // event" stores PerformEvent with negation.
@@ -16,6 +18,15 @@ const UNIT_MAX_HOURS: Record<string, number> = { h: 1, d: 24, w: 7 * 24, m: 31 *
 const RELATIVE_DATE_PATTERN = /^-(\d+)([hdwm])$/
 
 export type FlagCallCriterionProblem = 'type' | 'window' | 'filters'
+
+/** What happens to a criterion with each problem once new flag calls stop going to the events table. Each caller
+ * adds its own lead-in, because the timing reads differently before the move and after it. */
+export const FLAG_CALL_PROBLEM_EFFECTS: Record<FlagCallCriterionProblem, string> = {
+    type: 'this criterion stops matching new flag calls. To keep it matching, change it to "Completed event", "Did not complete event" or "Completed an event multiple times".',
+    window: `this criterion counts every flag call only if its range is relative to today and goes back ${MAX_LOOKBACK_DAYS} days or less, such as "Last 30 days".`,
+    filters:
+        'PostHog may not be able to calculate this cohort. To keep it working, filter this criterion on event properties only.',
+}
 
 /**
  * Why the batch calculation can't count every matching call for this "Feature flag called" criterion once flag calls
@@ -48,6 +59,33 @@ export function moveNoticeProblem(
         (criteria.seq_event_type === TaxonomicFilterGroupType.Events &&
             moveNoticeEvents.includes(String(criteria.seq_event)))
     return namesMovingEvent ? flagCallCriterionProblem(criteria) : null
+}
+
+function firstGroupProblem(group: CohortCriteriaGroupFilter): FlagCallCriterionProblem | null {
+    const values: (AnyCohortCriteriaType | CohortCriteriaGroupFilter)[] = group.values
+    for (const value of values) {
+        const problem = isCohortCriteriaGroup(value)
+            ? firstGroupProblem(value)
+            : moveNoticeProblem(value, [FEATURE_FLAG_CALLED_EVENT])
+        if (problem !== null) {
+            return problem
+        }
+    }
+    return null
+}
+
+/**
+ * A static cohort keeps the people it already has. An experiment's exposure cohort is left out, because its
+ * criterion belongs to the experiment.
+ */
+export function cohortFlagCallProblem(
+    cohort: Pick<CohortType, 'is_static' | 'filters' | 'experiment_set'>
+): FlagCallCriterionProblem | null {
+    const criteria = cohort.filters?.properties
+    if (cohort.is_static || cohort.experiment_set?.length || !criteria) {
+        return null
+    }
+    return firstGroupProblem(criteria)
 }
 
 function windowStart(criteria: AnyCohortCriteriaType): string | null {

@@ -27,6 +27,7 @@ from posthog.hogql.direct_connection import INVALID_CONNECTION_ID_ERROR
 from posthog.hogql.flag_called_warnings import (
     FLAG_CALLED_FROM_BOTH_TABLES_NOTICE,
     FLAG_CALLED_FROM_FLAG_EVALUATIONS_NOTICE,
+    FLAG_CALLED_ON_EVENTS_AFTER_MOVE_WARNING,
     FLAG_CALLED_ON_EVENTS_WARNING,
     FLAG_CALLED_SPLIT_BY_AGE_NOTICE,
 )
@@ -527,6 +528,14 @@ class TestMetadata(ClickhouseTestMixin, APIBaseTest):
                 mode=FlagEvaluationsMode.READ_FLAG_EVALUATIONS,
             ),
             param(
+                "mixed_scan_with_the_union_off_once_events_gets_no_flag_calls",
+                "SELECT count() FROM events WHERE event IN ('$pageview', '$feature_flag_called')",
+                True,
+                1,
+                mode=FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                move_warning=FLAG_CALLED_ON_EVENTS_AFTER_MOVE_WARNING,
+            ),
+            param(
                 "read_from_flag_evaluations_without_coverage_once_events_gets_no_flag_calls",
                 _FLAG_CALLED_QUERY,
                 True,
@@ -567,6 +576,7 @@ class TestMetadata(ClickhouseTestMixin, APIBaseTest):
         union_enabled: bool = False,
         expected_union_notices: int = 0,
         union_notice: str = FLAG_CALLED_SPLIT_BY_AGE_NOTICE,
+        move_warning: str = FLAG_CALLED_ON_EVENTS_WARNING,
     ) -> None:
         OrganizationFeatureFlagsConfig.objects.update_or_create(
             organization=self.organization,
@@ -600,7 +610,7 @@ class TestMetadata(ClickhouseTestMixin, APIBaseTest):
             metadata = self._select(query)
 
         self.assertTrue(metadata.isValid, metadata.errors)
-        warnings = [w for w in metadata.warnings if w.message == FLAG_CALLED_ON_EVENTS_WARNING]
+        warnings = [w for w in metadata.warnings if w.message == move_warning]
         notices = [n for n in metadata.notices if n.message == FLAG_CALLED_FROM_FLAG_EVALUATIONS_NOTICE]
         union_notices = [n for n in metadata.notices if n.message == union_notice]
         literal_start = query.rindex("'$feature_flag_called'")

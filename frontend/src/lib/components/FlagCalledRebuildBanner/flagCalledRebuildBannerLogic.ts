@@ -8,7 +8,7 @@ import { teamLogic } from 'scenes/teamLogic'
 
 import { TeamPublicType, TeamType } from '~/types'
 
-export type FlagCalledArtifactType = 'insight' | 'dashboard' | 'action' | 'cohort'
+export type FlagCalledArtifactType = 'cohort'
 
 /** The announcement link from the flag's `{ "url": … }` payload, or null until the payload holds an https URL with a host. */
 export function announcementUrlFromPayload(payload: unknown): string | null {
@@ -63,7 +63,7 @@ export const flagCalledRebuildBannerLogic = kea<flagCalledRebuildBannerLogicType
         reportBannerShown: (artifactType: FlagCalledArtifactType) => ({ artifactType }),
     }),
     selectors({
-        // A team on mode 0 still builds events series in its pickers, so it has no way to rebuild yet.
+        // On mode 0 the cohort criteria editor warns about each criterion instead.
         bannersEnabled: [
             (s) => [s.currentTeam, s.featureFlags],
             (currentTeam: TeamPublicType | TeamType | null, featureFlags: FeatureFlagsSet): boolean =>

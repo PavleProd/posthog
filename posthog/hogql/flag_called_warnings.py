@@ -14,9 +14,16 @@ from posthog.dataclasses import frozen
 
 # Orgs that can't query posthog.flag_evaluations yet get this warning too, so the copy speaks of the move in the future.
 FLAG_CALLED_ON_EVENTS_WARNING = (
-    f"{FLAG_CALLED_EVENT} is moving from events to posthog.flag_evaluations. Once the move finishes "
-    "for your organization, this query will stop returning these events and you can query "
-    "posthog.flag_evaluations instead."
+    f"{FLAG_CALLED_EVENT} is moving from events to posthog.flag_evaluations, which keeps the last 90 days of flag "
+    "calls. Once the move finishes for your organization, most queries read these events from "
+    "posthog.flag_evaluations with no edits. Some queries can't, such as one that selects *, uses SAMPLE or FINAL, "
+    "reads group properties as of the event, or reads a saved view. Those fail or miss flag calls, so query "
+    "posthog.flag_evaluations directly for them."
+)
+
+FLAG_CALLED_ON_EVENTS_AFTER_MOVE_WARNING = (
+    f"Your organization's new {FLAG_CALLED_EVENT} events go only to posthog.flag_evaluations, but this query reads "
+    "them from events, which has only older ones. Query posthog.flag_evaluations to include recent flag calls."
 )
 
 FLAG_CALLED_FROM_FLAG_EVALUATIONS_NOTICE = (

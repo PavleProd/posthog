@@ -38,6 +38,8 @@ from posthog.hogql.filters import replace_filters
 from posthog.hogql.flag_called_warnings import (
     FLAG_CALLED_FROM_BOTH_TABLES_NOTICE,
     FLAG_CALLED_FROM_FLAG_EVALUATIONS_NOTICE,
+    FLAG_CALLED_ON_EVENTS_AFTER_MOVE_WARNING,
+    FLAG_CALLED_ON_EVENTS_WARNING,
     FLAG_CALLED_SPLIT_BY_AGE_NOTICE,
     LiteralSpan,
     flag_called_on_events_warnings,
@@ -369,10 +371,12 @@ def _flag_called_notices(
         flag_evaluations_notices: list[HogQLNotice] = []
         both_tables_notices: list[HogQLNotice] = []
         read_from_both_tables = flag_called_spans_read_from_union(context)
+        only_in_flag_evaluations = context.database is not None and context.database.flag_calls_only_in_flag_evaluations
         both_tables_message = (
-            FLAG_CALLED_FROM_BOTH_TABLES_NOTICE
-            if context.database is not None and context.database.flag_calls_only_in_flag_evaluations
-            else FLAG_CALLED_SPLIT_BY_AGE_NOTICE
+            FLAG_CALLED_FROM_BOTH_TABLES_NOTICE if only_in_flag_evaluations else FLAG_CALLED_SPLIT_BY_AGE_NOTICE
+        )
+        move_message = (
+            FLAG_CALLED_ON_EVENTS_AFTER_MOVE_WARNING if only_in_flag_evaluations else FLAG_CALLED_ON_EVENTS_WARNING
         )
         for warning in warnings:
             span = LiteralSpan(start=warning.start, end=warning.end)
@@ -383,7 +387,7 @@ def _flag_called_notices(
             elif span in read_from_both_tables:
                 both_tables_notices.append(warning.model_copy(update={"message": both_tables_message, "url": url}))
             else:
-                move_warnings.append(warning.model_copy(update={"url": url}))
+                move_warnings.append(warning.model_copy(update={"message": move_message, "url": url}))
         return _FlagCalledNotices(
             move_warnings=tuple(move_warnings),
             flag_evaluations_notices=tuple(flag_evaluations_notices),
