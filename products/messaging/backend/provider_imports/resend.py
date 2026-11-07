@@ -40,6 +40,7 @@ from products.messaging.backend.provider_imports.base import (
     StepCheckpoint,
     UnknownImportStep,
 )
+from products.messaging.backend.provider_imports.imported_senders import apply_sender
 from products.messaging.backend.provider_imports.resend_templates import (
     ConvertedTemplate,
     convert_template,
@@ -512,17 +513,7 @@ def _email_content(
     display_name, address = parseaddr(str(template.get("from") or ""))
     if not address:
         return email, ("Resend has no sender for this template. Choose one before you send it.",)
-    sender = senders.get(address.lower())
-    if sender is None:
-        return email, (f"{address} isn't a PostHog sender yet. Add it, then choose it on this template.",)
-    email["from"] = {
-        "integrationId": sender.id,
-        "email": address,
-        "name": display_name or str(sender.config.get("name") or ""),
-    }
-    if not sender.config.get("verified"):
-        return email, (f"{address} isn't verified in PostHog yet, so this template can't send until it is.",)
-    return email, ()
+    return email, apply_sender(email, display_name, address, senders)
 
 
 def _fetch_automations(

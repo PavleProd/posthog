@@ -142,19 +142,11 @@ export function ProviderImportPanel({
         importRunsLoading,
         latestImportRun,
         isImportRunActive,
-        selectedImportSteps,
+        cannotStartImportReason,
         startedImportRunLoading,
         showImportAgainForm,
-        missingImportSetting,
     } = useValues(providerImportLogic)
     const { submitImportForm, startImport, setShowImportAgainForm, loadImportRuns } = useActions(providerImportLogic)
-
-    const cannotStartReason =
-        selectedImportSteps.length === 0
-            ? 'Select at least one thing to import'
-            : missingImportSetting
-              ? `Choose a value for ${missingImportSetting.label}`
-              : undefined
 
     if (importRuns === null && importRunsLoading) {
         return (
@@ -254,7 +246,7 @@ export function ProviderImportPanel({
                         type="primary"
                         onClick={() => startImport({ apiKey: null })}
                         loading={startedImportRunLoading}
-                        disabledReason={cannotStartReason}
+                        disabledReason={cannotStartImportReason}
                         data-attr={`${provider.key}-import-run-again`}
                     >
                         {latestImportRun ? 'Run again' : 'Start import'}
@@ -264,7 +256,7 @@ export function ProviderImportPanel({
                         type="primary"
                         onClick={submitImportForm}
                         loading={startedImportRunLoading}
-                        disabledReason={!importForm.api_key ? 'Enter your API key' : cannotStartReason}
+                        disabledReason={!importForm.api_key ? 'Enter your API key' : cannotStartImportReason}
                         data-attr={`${provider.key}-import-start`}
                     >
                         Start import
