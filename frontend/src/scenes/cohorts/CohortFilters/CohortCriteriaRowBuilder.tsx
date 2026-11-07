@@ -24,6 +24,7 @@ import { AnyCohortCriteriaType, BehavioralEventType, FilterLogicalOperator } fro
 
 import {
     FLAG_CALL_PROBLEM_EFFECTS,
+    flagCallMoveLeadIn,
     FlagCallCriterionProblem,
     moveNoticeProblem,
 } from 'products/cohorts/frontend/criteria/flagCallCriterionProblem'
@@ -40,7 +41,7 @@ export interface CohortCriteriaRowBuilderProps {
 }
 
 function moveNoticeText(problem: FlagCallCriterionProblem): string {
-    return `Feature flag called is moving out of the events table. When the move finishes, ${FLAG_CALL_PROBLEM_EFFECTS[problem]}`
+    return `${flagCallMoveLeadIn(false)} ${FLAG_CALL_PROBLEM_EFFECTS[problem]}`
 }
 
 export function CohortCriteriaRowBuilder({

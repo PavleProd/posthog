@@ -19,11 +19,10 @@ const RELATIVE_DATE_PATTERN = /^-(\d+)([hdwm])$/
 
 export type FlagCallCriterionProblem = 'type' | 'window' | 'filters'
 
-/** What happens to a criterion with each problem once new flag calls stop going to the events table. Each caller
- * adds its own lead-in, because the timing reads differently before the move and after it. */
+/** What happens to a criterion with each problem once PostHog stops writing flag calls to the events table. */
 export const FLAG_CALL_PROBLEM_EFFECTS: Record<FlagCallCriterionProblem, string> = {
     type: 'this criterion stops matching new flag calls. To keep it matching, change it to "Completed event", "Did not complete event" or "Completed an event multiple times".',
-    window: `this criterion counts every flag call only if its range is relative to today and goes back ${MAX_LOOKBACK_DAYS} days or less, such as "Last 30 days".`,
+    window: `this criterion misses some flag calls. To count them all, use a range relative to today that goes back ${MAX_LOOKBACK_DAYS} days or less, such as "Last 30 days".`,
     filters:
         'PostHog may not be able to calculate this cohort. To keep it working, filter this criterion on event properties only.',
 }
@@ -47,6 +46,13 @@ export function flagCallCriterionProblem(criteria: AnyCohortCriteriaType): FlagC
         return 'filters'
     }
     return null
+}
+
+/** The step of the move that the problem follows from, in the words of the troubleshooting doc. */
+export function flagCallMoveLeadIn(writesStopped: boolean): string {
+    return writesStopped
+        ? 'PostHog no longer writes flag calls to the events table, so'
+        : 'Once PostHog stops writing flag calls to the events table,'
 }
 
 /** The problem to warn about when the criterion names one of the events that are moving, or null. */

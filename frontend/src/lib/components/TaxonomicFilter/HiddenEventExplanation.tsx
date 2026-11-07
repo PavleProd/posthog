@@ -12,8 +12,8 @@ export function HiddenEventExplanation(): JSX.Element {
 
     return (
         <>
-            PostHog still collects this event, but you can't select it here because PostHog reads it from a separate
-            table. To see how a flag is used, open the flag and check its Usage tab.
+            PostHog still collects this event, but you can't add it here while it moves out of the events table. To see
+            how a flag is used, open the flag and check its Usage tab.
             {announcementUrl && (
                 <>
                     {' '}

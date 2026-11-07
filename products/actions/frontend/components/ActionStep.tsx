@@ -135,9 +135,9 @@ export function ActionStep({
                                             : undefined
                                     }
                                 >
-                                    Feature flag called is moving out of the events table. Once your organization starts
-                                    the move, you can't add new steps on it. To see how a flag is used, open the flag
-                                    and check its Usage tab.
+                                    Feature flag called is moving out of the events table. Once PostHog starts reading
+                                    flag calls from the new table, you can't add new steps on this event. To see how a
+                                    flag is used, open the flag and check its Usage tab.
                                 </LemonBanner>
                             )}
 

@@ -40,7 +40,9 @@ import { pluralize } from 'lib/utils/strings'
 import { StaticCohortMode, cohortEditLogic } from 'scenes/cohorts/cohortEditLogic'
 import { CohortCriteriaGroups } from 'scenes/cohorts/CohortFilters/CohortCriteriaGroups'
 import { COHORT_TYPE_OPTIONS } from 'scenes/cohorts/CohortFilters/constants'
+import { storesFlagCallsOutsideEvents } from 'scenes/feature-flags/flagEvaluationsTable'
 import { interProjectCopyLogic } from 'scenes/resource-transfer/interProjectCopyLogic'
+import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 
 import { sidePanelStateLogic } from '~/layout/navigation-3000/sidepanel/sidePanelStateLogic'
@@ -61,6 +63,7 @@ import { ActivityScope, CohortType, SidePanelTab } from '~/types'
 import {
     FLAG_CALL_PROBLEM_EFFECTS,
     cohortFlagCallProblem,
+    flagCallMoveLeadIn,
 } from 'products/cohorts/frontend/criteria/flagCallCriterionProblem'
 import type { CohortUsedInResponseApi } from 'products/cohorts/frontend/generated/api.schemas'
 import { CohortRealtimeStatus } from 'products/cohorts/frontend/realtime/CohortRealtimeStatus'
@@ -217,6 +220,7 @@ export function CohortEdit({ id, attachTo }: CohortEditProps): JSX.Element {
 
     const isNewCohort = cohort.id === 'new' || cohort.id === undefined
     const flagCallProblem = cohortFlagCallProblem(cohort)
+    const { currentTeam } = useValues(teamLogic)
     const accessDisabledReason = messageAudienceAccessDisabledReason()
     const broadcastDisabledReason = cohortBroadcastDisabledReason(cohort) ?? accessDisabledReason
     const broadcastLogic = messageAudienceOpenLogic({ audience: cohortBroadcastAudience(cohort) })
@@ -836,9 +840,9 @@ export function CohortEdit({ id, attachTo }: CohortEditProps): JSX.Element {
                                     <SceneDivider />
                                     {!isNewCohort && flagCallProblem !== null && (
                                         <FlagCalledRebuildBanner artifactType="cohort">
-                                            This cohort has a criterion on Feature flag called. Once new flag calls stop
-                                            going to the events table,{' '}
-                                            <span>{FLAG_CALL_PROBLEM_EFFECTS[flagCallProblem]}</span>
+                                            A criterion on Feature flag called needs a change.{' '}
+                                            {flagCallMoveLeadIn(storesFlagCallsOutsideEvents(currentTeam))}{' '}
+                                            {FLAG_CALL_PROBLEM_EFFECTS[flagCallProblem]}
                                         </FlagCalledRebuildBanner>
                                     )}
                                     {!isNewCohort && cohort.experiment_set && cohort.experiment_set.length > 0 && (
