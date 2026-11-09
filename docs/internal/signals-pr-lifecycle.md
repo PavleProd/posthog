@@ -295,7 +295,9 @@ The report remains readable and supports discussion, assignment, resolution, and
 
 Report access checks share pending and recent results by project, installation, and repository for up to 30 seconds. Explicit retries invalidate the project cache. A pending request is canceled when its last report reader leaves or after 30 seconds, allowing stalled checks to be retried; temporary failures are not cached. The backend still checks live access before creating an implementation task.
 
-Client-side access controls apply only after the server confirms pilot eligibility. Unknown eligibility, including a pending or failed onboarding request, leaves the existing implementation action available; the backend remains responsible for checking repository access.
+When a report has no selected repository, Implement shows Select repository and opens a repository picker. Task creation waits for a selection. The chosen repository is saved in the report's work log before the implementation starts, so the backend keeps responsibility for repository resolution and live access checks. The selection does not enable automatic implementation. This recovery applies to report details and triage, including projects outside the GitHub-optional pilot.
+
+Client-side GitHub access controls apply only after the server confirms pilot eligibility. Unknown eligibility, including a pending or failed onboarding request, leaves the implementation action available for reports with a selected repository; the backend remains responsible for checking repository access.
 
 Disable the flag to remove pilot activation and restore legacy behavior on subsequent research passes. Running passes finish with their recorded decision. Reports and saved source/scout settings remain intact; fleet dispatch still applies its ordinary enrollment and exclusion gates.
 

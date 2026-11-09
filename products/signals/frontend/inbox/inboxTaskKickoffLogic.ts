@@ -49,6 +49,7 @@ import {
     WarmTaskRequestApi,
 } from 'products/tasks/frontend/generated/api.schemas'
 
+import { signalsReportArtefactsCreate } from '../generated/api'
 import type { SignalReportCheckApi } from '../generated/api.schemas'
 import { InboxReportActionType, captureInboxReportActionCompleted } from './inboxAnalytics'
 import { selfDrivingTrialLogic } from './logics/selfDrivingTrialLogic'
@@ -512,10 +513,12 @@ export interface inboxTaskKickoffLogicActions {
     }
     createPrFromReport: (
         report: SignalReport,
-        feedback?: string
+        feedback?: string,
+        repository?: string
     ) => {
         feedback: string | undefined
         report: SignalReport
+        repository: string | undefined
     }
     createPrSuccess: () => {
         value: true
@@ -682,7 +685,11 @@ export const inboxTaskKickoffLogic = kea<inboxTaskKickoffLogicType>([
             pullRequestUrl,
             background,
         }),
-        createPrFromReport: (report: SignalReport, feedback?: string) => ({ report, feedback }),
+        createPrFromReport: (report: SignalReport, feedback?: string, repository?: string) => ({
+            report,
+            feedback,
+            repository,
+        }),
         warmReportDiscussion: (report: SignalReport) => ({ report }),
         releaseReportDiscussionWarm: true,
         setReportWarmLease: (lease: ReportWarmLease | null) => ({ lease }),
@@ -1051,7 +1058,7 @@ export const inboxTaskKickoffLogic = kea<inboxTaskKickoffLogicType>([
                 }
             }
         },
-        createPrFromReport: async ({ report, feedback }) => {
+        createPrFromReport: async ({ report, feedback, repository }) => {
             // Lazy: a static import puts the inbox setup stack in the shell bundle of every logged-in page.
             const githubAccess = await import('./logics/reportGithubAccessLogic').catch((error) => {
                 handleKickoffError(error, report, 'create_pr', "Couldn't start the PR task. Try again.")
@@ -1064,6 +1071,7 @@ export const inboxTaskKickoffLogic = kea<inboxTaskKickoffLogicType>([
             const { reportGithubAccessLogic } = githubAccess
             const disabledReason =
                 values.createPrDisabledReason ??
+                (report.repo_slug === null && !repository ? 'Select a repository to implement this report.' : null) ??
                 (
                     reportGithubAccessLogic.findMounted({ report, surface: 'triage_mode' }) ??
                     reportGithubAccessLogic.findMounted({ report })
@@ -1092,6 +1100,20 @@ export const inboxTaskKickoffLogic = kea<inboxTaskKickoffLogicType>([
             try {
                 if (values.currentProjectId == null) {
                     throw new Error('Project is required')
+                }
+                if (report.repo_slug === null && repository) {
+                    await signalsReportArtefactsCreate(String(values.currentProjectId), report.id, {
+                        artefact_type: 'repo_selection',
+                        content: {
+                            repository,
+                            reason: 'Selected by the user for implementation.',
+                            research_context: report.research_context ?? null,
+                            autostart_eligible: false,
+                        },
+                    })
+                    if (disposables.isDisposed) {
+                        return
+                    }
                 }
                 const { taskId, runId } = await createReportTask(
                     String(values.currentProjectId),

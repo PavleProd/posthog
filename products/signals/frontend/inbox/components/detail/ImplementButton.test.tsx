@@ -85,6 +85,48 @@ describe('ImplementButton', () => {
         })
     })
 
+    it.each(['detail_pane', 'triage_mode'] as const)(
+        'requires a repository before implementation from %s',
+        async (surface) => {
+            useMocks({
+                get: {
+                    '/api/projects/:team_id/integrations/': {
+                        results: [{ id: 1, kind: 'github', display_name: 'Example' }],
+                        next: null,
+                    },
+                    '/api/projects/:team_id/integrations/1/github_repos/': {
+                        repositories: [{ id: 1, name: 'app', full_name: 'example/app' }],
+                        has_more: false,
+                    },
+                },
+            })
+            const user = userEvent.setup()
+            const report = { ...makeReport(), repo_slug: null }
+            render(<ImplementButton report={report} surface={surface} />)
+
+            await user.click(screen.getByText('Select repository'))
+            expect(createPrFromReport).not.toHaveBeenCalled()
+            expect(screen.getByTestId('inbox-report-create-pr-submit')).toHaveAttribute('aria-disabled', 'true')
+            await user.type(
+                screen.getByPlaceholderText('Add instructions for the PostHog agent (optional)'),
+                'Keep the API{Enter}'
+            )
+            expect(createPrFromReport).not.toHaveBeenCalled()
+
+            await user.click(screen.getByTestId('select-github-repository'))
+            await user.click(await screen.findByText('example/app'))
+            await user.click(screen.getByTestId('inbox-report-create-pr-submit'))
+
+            expect(createPrFromReport).toHaveBeenCalledWith(report, 'Keep the API', 'example/app')
+            expect(captureInboxReportAction).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    actionType: 'github_access_recovery',
+                    extra: { stage: 'repository_selected', outcome: undefined },
+                })
+            )
+        }
+    )
+
     it('opens the implementation choices when a link asks for them', async () => {
         const user = userEvent.setup()
         const onChoicesOpenedFromLink = jest.fn()

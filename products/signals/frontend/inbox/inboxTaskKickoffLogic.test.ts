@@ -365,6 +365,51 @@ describe('inboxTaskKickoffLogic', () => {
             expect(createdTasks[0]).not.toHaveProperty('branch')
         })
 
+        it('does not start implementation for a report with no repository', async () => {
+            await expectLogic(logic, () =>
+                logic.actions.createPrFromReport({ ...report, repo_slug: null })
+            ).toFinishAllListeners()
+
+            expect(createdTasks).toHaveLength(0)
+            expect(startedRuns).toHaveLength(0)
+            expect(logic.values.isCreatingPr).toBe(false)
+        })
+
+        it.each([201, 503])('saves the repository before task creation (status %i)', async (status) => {
+            const selections: Record<string, unknown>[] = []
+            useMocks({
+                post: {
+                    '/api/projects/:team/signals/reports/:id/artefacts/': async ({ request }) => {
+                        expect(createdTasks).toHaveLength(0)
+                        selections.push((await request.json()) as Record<string, unknown>)
+                        return [status, status === 201 ? { id: 'selection-1' } : { detail: 'Try again.' }]
+                    },
+                },
+            })
+            await expectLogic(logic, () =>
+                logic.actions.createPrFromReport({ ...report, repo_slug: null }, 'Keep the API', 'example/app')
+            ).toFinishAllListeners()
+
+            expect(selections).toEqual([
+                {
+                    artefact_type: 'repo_selection',
+                    content: {
+                        repository: 'example/app',
+                        reason: 'Selected by the user for implementation.',
+                        research_context: null,
+                        autostart_eligible: false,
+                    },
+                },
+            ])
+            expect(createdTasks).toHaveLength(status === 201 ? 1 : 0)
+            expect(startedRuns).toHaveLength(status === 201 ? 1 : 0)
+            if (status === 201) {
+                expect(createdTasks[0]).not.toHaveProperty('repository')
+                expect(createdTasks[0].signal_report_task_relationship).toBe('implementation')
+            }
+            expect(logic.values.isCreatingPr).toBe(false)
+        })
+
         it('reuses the warm run on submit instead of starting a second run', async () => {
             warmResponse = { task_id: 'warm-task', run_id: 'warm-run' }
             createResponse = { id: 'warm-task', latest_run: { id: 'warm-run' } }

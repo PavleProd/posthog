@@ -23,6 +23,25 @@ export const Default: Story = {
     render: () => <ImplementButton report={report} />,
 }
 
+export const NoRepository: Story = {
+    parameters: { testOptions: { snapshotBrowsers: [] } },
+    decorators: [
+        mswDecorator({
+            get: {
+                '/api/projects/:id/integrations/': {
+                    results: [{ id: 1, kind: 'github', display_name: 'Example' }],
+                    next: null,
+                },
+                '/api/projects/:id/integrations/1/github_repos/': {
+                    repositories: [{ id: 1, name: 'app', full_name: 'example/app', permissions: { push: true } }],
+                    has_more: false,
+                },
+            },
+        }),
+    ],
+    render: () => <ImplementButton report={{ ...report, repo_slug: null }} />,
+}
+
 export const Choices: Story = {
     parameters: { testOptions: { snapshotTargetSelector: '.Popover' } },
     render: () => <ImplementButton report={report} />,
