@@ -30,7 +30,25 @@ import {
     withoutKeys,
 } from './todayPulseEditorRows'
 
-export function TodayPulseEditor(): JSX.Element {
+const EDIT_TRIGGER = (
+    <Button
+        variant="link-muted"
+        size="sm"
+        className="-mx-2 -my-1 text-[13px]"
+        aria-label="Edit numbers"
+        data-attr="today-pulse-edit"
+    >
+        Edit
+    </Button>
+)
+
+export function TodayPulseEditor({
+    trigger = EDIT_TRIGGER,
+    align = 'end',
+}: {
+    trigger?: JSX.Element
+    align?: 'start' | 'center' | 'end'
+}): JSX.Element {
     const {
         pulsePins,
         pulseSlots,
@@ -109,23 +127,10 @@ export function TodayPulseEditor(): JSX.Element {
                 togglePulsePin(row, 'editor')
             }}
         >
-            <ComboboxTrigger
-                ref={triggerRef}
-                render={
-                    <Button
-                        variant="link-muted"
-                        size="sm"
-                        className="-mx-2 -my-1 text-[13px]"
-                        aria-label="Edit numbers"
-                        data-attr="today-pulse-edit"
-                    >
-                        Edit
-                    </Button>
-                }
-            />
+            <ComboboxTrigger ref={triggerRef} render={trigger} />
             <ComboboxContent
                 anchor={triggerRef}
-                align="end"
+                align={align}
                 className="w-72 [&_[data-slot=combobox-input-group-wrapper]]:border-b-0"
             >
                 <ComboboxInput
