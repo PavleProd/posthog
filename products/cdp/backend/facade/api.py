@@ -21,6 +21,7 @@ from posthog.models.user import User
 from products.cdp.backend.flag_gated_templates import FLAG_GATED_TEMPLATE_IDS, gated_template_enabled
 from products.cdp.backend.models.hog_function_template import HogFunctionTemplate
 from products.cdp.backend.models.hog_functions import HogFunction
+from products.cdp.backend.models.hog_functions.hog_function import HogFunctionType
 
 _B = "products.cdp.backend."
 
@@ -31,6 +32,7 @@ __all__ = [
     "create_hog_functions",
     "has_enabled_hog_function_for_warehouse_table",
     "is_hog_function_template_available",
+    "teams_with_enabled_transformation",
     "warehouse_tables_with_enabled_hog_functions",
 ]
 
@@ -110,6 +112,23 @@ def warehouse_tables_with_enabled_hog_functions(
         for table in (filters or {}).get("data_warehouse") or []
         if isinstance(table, dict) and isinstance(table.get("table_name"), str) and table["table_name"] in names
     }
+
+
+def teams_with_enabled_transformation(*, template_id: str, team_ids: Collection[int]) -> set[int]:
+    """The given teams that run an enabled transformation built from this template."""
+    if not team_ids:
+        return set()
+    return set(
+        HogFunction.objects.filter(
+            team_id__in=list(team_ids),
+            template_id=template_id,
+            type=HogFunctionType.TRANSFORMATION,
+            enabled=True,
+        )
+        .exclude(deleted=True)
+        .values_list("team_id", flat=True)
+        .distinct()
+    )
 
 
 def __getattr__(name: str):
