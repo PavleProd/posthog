@@ -1428,10 +1428,7 @@ class UserAccessControl:
 
         model_has_creator = hasattr(model, "created_by")
 
-        filters = self._access_controls_filters_for_queryset(resource)
-        access_controls = self._get_access_controls(filters)
-
-        decision = self._blocked_and_allowed_object_ids(resource, access_controls)
+        decision = self.queryset_object_decision(resource)
 
         # Apply filtering logic based on resource-level access
         if not self.has_resource_access(resource):
@@ -1450,6 +1447,14 @@ class UserAccessControl:
                 queryset = queryset.exclude(id__in=decision.blocked_ids)
 
         return queryset
+
+    def queryset_object_decision(self, resource: APIScopeObject) -> ObjectAccessDecision:
+        """The objects of `resource` that `filter_queryset_by_access_level` blocks or allows by their own rules.
+
+        The authorization SDK lists object ids from this, so its lists and this filter cannot disagree.
+        """
+        filters = self._access_controls_filters_for_queryset(resource)
+        return self._blocked_and_allowed_object_ids(resource, self._get_access_controls(filters))
 
     def _blocked_and_allowed_object_ids(
         self, resource: APIScopeObject, access_controls: list[_AccessControl]
