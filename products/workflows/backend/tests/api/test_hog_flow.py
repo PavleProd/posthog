@@ -8534,12 +8534,47 @@ class TestHogFlowSecretInputs(APIBaseTest):
                 0,
             ),
             ("values_by_index", _HOST_URL, ["evil.example.com"], None, "invalid_input", 0),
+            (
+                "new_type_for_the_default_value",
+                "https://{if(variables.trusted, 'trusted.example.com', event.properties.host)}/hook",
+                {"trusted": 0},
+                None,
+                "secret_reentry_required",
+                0,
+                [{"key": "trusted", "type": "string", "default": "0"}],
+            ),
+            (
+                "empty_text_for_an_empty_default",
+                "https://{variables.host ?? 'trusted.example.com'}/hook",
+                {"host": ""},
+                None,
+                "secret_reentry_required",
+                0,
+                [{"key": "host", "type": "string", "default": ""}],
+            ),
+            (
+                "new_value_for_a_name_with_a_dollar_sign",
+                "https://{variables.host$}/hook",
+                {"host$": "evil.example.com"},
+                None,
+                "secret_reentry_required",
+                0,
+                [{"key": "host$", "type": "string", "default": "example.com"}],
+            ),
+            (
+                "new_value_for_a_liquid_name_after_a_line_break",
+                {"value": "https://{{\nvariables.host }}/hook", "templating": "liquid"},
+                {"host": "evil.example.com"},
+                None,
+                "secret_reentry_required",
+                0,
+            ),
         ]
     )
     def test_a_test_run_cannot_send_an_unbound_secret_elsewhere_through_variables(
-        self, _name, url, supplied, configured_api_key, expected_code, expected_runs
+        self, _name, url, supplied, configured_api_key, expected_code, expected_runs, variables=_HOST_VARIABLES
     ):
-        flow_id = self._active_flow(url, _HOST_VARIABLES)
+        flow_id = self._active_flow(url, variables)
         body: dict[str, Any] = {
             "globals": {"event": {"event": "$pageview"}, "variables": supplied},
             "mock_async_functions": False,
@@ -8945,6 +8980,67 @@ class TestHogFlowSecretInputs(APIBaseTest):
             res = send(url, {**schedule, "variables": variables}, format="json")
 
         assert res.status_code == expected_status, res.json()
+
+    @parameterized.expand(
+        [
+            ("flag_on", {"host": "evil.example.com"}, True, 0),
+            ("flag_off", {"host": "evil.example.com"}, False, 1),
+            ("default_value", {"host": "example.com"}, True, 1),
+        ]
+    )
+    @override_settings(INTERNAL_API_SECRET="test-secret")
+    def test_a_stored_schedule_cannot_send_an_unbound_secret_elsewhere_through_variables(
+        self, _name, variables, flag_on, expected_runs
+    ):
+        flow_id = self._active_flow(_HOST_URL, _HOST_VARIABLES)
+        HogFlow.objects.filter(id=flow_id).update(trigger={"type": "schedule"})
+        HogFlowSchedule.objects.create(
+            team=self.team,
+            hog_flow_id=flow_id,
+            rrule="FREQ=HOURLY;INTERVAL=1",
+            starts_at=datetime(2026, 1, 1, tzinfo=UTC),
+            timezone="UTC",
+            status="active",
+            next_run_at=datetime(2020, 1, 1, tzinfo=UTC),
+            variables=variables,
+        )
+
+        with (
+            patch("products.cdp.backend.secret_binding.posthoganalytics.feature_enabled", return_value=flag_on),
+            patch("products.workflows.backend.services.hog_flow_schedules.create_hog_flow_scheduled_invocation") as run,
+        ):
+            res = self.client.post(
+                "/api/internal/hog_flows/process_due_schedules",
+                content_type="application/json",
+                headers={"x-internal-api-secret": "test-secret"},
+            )
+
+        assert res.status_code == 200, res.json()
+        assert run.call_count == expected_runs
+
+    @parameterized.expand(
+        [
+            ("new_value", {"host": "evil.example.com"}, 400),
+            ("default_value", {"host": "example.com"}, 200),
+        ]
+    )
+    def test_a_batch_run_cannot_send_an_unbound_secret_elsewhere_through_variables(
+        self, _name, variables, expected_status
+    ):
+        flow_id = self._active_flow(_HOST_URL, _HOST_VARIABLES)
+
+        with (
+            patch("products.cdp.backend.secret_binding.posthoganalytics.feature_enabled", return_value=True),
+            patch(
+                "products.workflows.backend.models.hog_flow_batch_job.hog_flow_batch_job.create_batch_hog_flow_job_invocation"
+            ) as dispatch,
+        ):
+            res = self.client.post(
+                f"/api/projects/{self.team.id}/hog_flows/{flow_id}/batch_jobs", {"variables": variables}, format="json"
+            )
+
+        assert res.status_code == expected_status, res.json()
+        assert dispatch.called == (expected_status == 200)
 
 
 def _create_task_template() -> dict:

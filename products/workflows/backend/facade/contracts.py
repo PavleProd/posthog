@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from posthog.models.team.team import Team
     from posthog.models.user import User
 
-    from products.cdp.backend.secret_binding import OriginOutcome
+    from products.cdp.backend.facade.contracts import OriginOutcome
 
 
 @frozen

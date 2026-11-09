@@ -11,11 +11,19 @@ import structlog
 
 from posthog.plugins.plugin_server_api import create_hog_flow_scheduled_invocation
 
+from products.cdp.backend.facade.secret_origins import secret_host_binding_on
 from products.workflows.backend.facade.contracts import ProcessedSchedules, WorkflowSchedule, WorkflowScheduleNotFound
 from products.workflows.backend.facade.enums import HogFlowScheduleStatus
 from products.workflows.backend.models.hog_flow.hog_flow import HogFlow
 from products.workflows.backend.models.hog_flow_batch_job import HogFlowBatchJob
 from products.workflows.backend.models.hog_flow_schedule import SCHEDULED_TRIGGER_TYPES, HogFlowSchedule
+from products.workflows.backend.services.hog_flow_secret_origins import sends_steered_by_supplied_variables
+from products.workflows.backend.services.hog_flow_secrets import (
+    TemplateCache,
+    merge_secret_maps,
+    plaintext_secret_map,
+    rehydrate_flow_secrets,
+)
 from products.workflows.backend.utils.rrule_utils import compute_next_occurrences
 
 logger = structlog.get_logger(__name__)
@@ -127,6 +135,30 @@ def _resolve_variables(hog_flow: HogFlow, schedule: HogFlowSchedule) -> dict[str
     return variables
 
 
+def _steers_stored_secrets(hog_flow: HogFlow, schedule: HogFlowSchedule) -> bool:
+    """Whether the schedule's variables send a step's unbound secret, or a connection, somewhere no check
+    has seen. A schedule saved while the flag was off was never refused, so each run checks it again."""
+    if (
+        not isinstance(schedule.variables, dict)
+        or not schedule.variables
+        or not secret_host_binding_on(hog_flow.team.uuid, hog_flow.team.organization_id)
+    ):
+        return False
+    template_cache: TemplateCache = {}
+    actions = hog_flow.actions if isinstance(hog_flow.actions, list) else []
+    secrets = merge_secret_maps(plaintext_secret_map(actions, template_cache), hog_flow.encrypted_inputs)
+    binding = sends_steered_by_supplied_variables(
+        rehydrate_flow_secrets(actions, secrets),
+        team_id=hog_flow.team_id,
+        edges=hog_flow.edges,
+        supplied=schedule.variables,
+        variables=hog_flow.variables,
+        entered={},
+        template_cache=template_cache,
+    )
+    return bool(binding.outcomes)
+
+
 def process_due_schedules() -> ProcessedSchedules:
     """Execute due schedules and initialize next_run_at for new ones, across all teams."""
     processed: list[str] = []
@@ -169,6 +201,13 @@ def process_due_schedules() -> ProcessedSchedules:
                     continue
 
                 _advance_next_run(schedule, after=schedule.next_run_at)
+
+                if _steers_stored_secrets(hog_flow, schedule):
+                    logger.warning(
+                        "Skipped a schedule that sends a stored secret elsewhere", schedule_id=str(schedule_id)
+                    )
+                    failed.append(str(schedule_id))
+                    continue
 
                 if trigger_type == "batch":
                     batch_job_params = {

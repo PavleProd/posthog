@@ -1,6 +1,6 @@
 """Bind each secret input of a workflow step to the origins the step's template code can send it to, and
 check that each connection a step holds sends its credentials only to its kind's origins, with the rules
-in `products.cdp.backend.secret_binding`.
+in `products.cdp.backend.facade.secret_origins`.
 
 A save restores a stored secret by step id and key, the staged draft's copy first, so each step is
 compared with the step on the side its secret came from. A staged secret without origins was never
@@ -15,35 +15,32 @@ every step that runs before it and the edges between them.
 import re
 import json
 import dataclasses
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Set
+from functools import partial
 from typing import Any, Optional
 
 from posthog.dataclasses import frozen
 
-from products.cdp.backend.secret_binding import (
-    OriginCheck,
-    OriginOutcome,
-    SecretBinding,
+from products.cdp.backend.facade.contracts import OriginCheck, OriginOutcome, SecretBinding
+from products.cdp.backend.facade.secret_origins import (
+    UNBOUND,
     SecretConfig,
+    SecretDestinations,
+    SecretOrigins,
     SecretWrite,
+    Unbound,
     comparable_config,
     comparable_inputs,
     entered_secret_input_keys,
     entry_with_origins,
     integration_origin_outcomes,
-    secret_binding,
-    unchanged_secrets,
-)
-from products.cdp.backend.secret_origins import (
-    UNBOUND,
-    SecretDestinations,
-    SecretOrigins,
-    Unbound,
     mapping_inputs,
     parse_stored_origins,
     public_secret_destinations,
+    secret_binding,
     secret_origins,
     secret_reentry_message,
+    unchanged_secrets,
 )
 from products.workflows.backend.facade.contracts import FlowSecretBinding, WorkflowEditState
 from products.workflows.backend.services.hog_flow_secrets import (
@@ -57,10 +54,10 @@ from products.workflows.backend.services.hog_flow_secrets import (
 # Fields of a step that change only how the editor shows it.
 _DISPLAY_FIELDS = frozenset({"name", "description", "position", "created_at", "updated_at"})
 
-# A reference to a workflow variable by name. Liquid names may hold hyphens, which Hog reads as a
-# subtraction, so both readings count. Any other use of `variables`, such as an index by a computed
-# key, can read every variable.
-_VARIABLE_REFERENCE = re.compile(r"\bvariables\b(?:\s*\.\s*(\w[\w-]*))?")
+# A reference to a workflow variable by name. Hog names may hold `$`, so the name runs to its last
+# such character. Liquid names may hold hyphens, which Hog reads as a subtraction, so both readings
+# count. Any other use of `variables`, such as an index by a computed key, can read every variable.
+_VARIABLE_REFERENCE = re.compile(r"\bvariables\b(?:\s*\.\s*([\w$][\w$-]*))?")
 
 _NOWHERE = SecretDestinations(hosts=frozenset(), built_from=frozenset())
 
@@ -76,8 +73,34 @@ def _template_schema(action: dict, template_cache: TemplateCache) -> list[dict]:
     return [schema for schema in (template.inputs_schema or []) if isinstance(schema, dict)] if template else []
 
 
-def _text(value: Any) -> Optional[str]:
-    return None if value is None else str(value)
+def _typed(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _js_falsy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int | float):
+        return value == 0
+    return value is None or value == ""
+
+
+def _same_as_default(value: Any, default: Any) -> bool:
+    """Whether a run's value for a variable equals what the worker would use without it. The worker keeps
+    each value's JSON type, and fills a missing value with `default ?? null` on a batch run but with
+    `default || null` on any other run, so the value must equal both."""
+    return _typed(value) == _typed(default) == _typed(None if _js_falsy(default) else default)
+
+
+def _strings(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _strings(item)
 
 
 def _steps(actions: Any) -> dict[str, dict]:
@@ -128,10 +151,9 @@ def _writes_any(action: dict, names: Optional[set[str]]) -> bool:
     return False
 
 
-def _variable_defaults(variables: Any, names: Optional[set[str]]) -> dict[Any, Optional[str]]:
-    # The API stores every default as text, so a re-save compares equal to a row written another way.
+def _variable_defaults(variables: Any, names: Optional[set[str]]) -> dict[Any, Any]:
     return {
-        item.get("key"): _text(item.get("default"))
+        item.get("key"): item.get("default")
         for item in variables or []
         if isinstance(item, dict) and (names is None or item.get("key") in names)
     }
@@ -145,14 +167,24 @@ def _without_bytecode(value: Any) -> Any:
     return value
 
 
-def _edge_endpoints(edge: Any) -> tuple[Optional[str], Optional[str]]:
+@frozen
+class _EdgeEndpoints:
+    source: Optional[str]
+    target: Optional[str]
+
+
+def _endpoint(value: Any) -> Optional[str]:
+    return None if value is None else str(value)
+
+
+def _edge_endpoints(edge: Any) -> _EdgeEndpoints:
     if not isinstance(edge, dict):
-        return None, None
-    return _text(edge.get("from")), _text(edge.get("to"))
+        return _EdgeEndpoints(source=None, target=None)
+    return _EdgeEndpoints(source=_endpoint(edge.get("from")), target=_endpoint(edge.get("to")))
 
 
 # A stored step holds a null for each field it leaves unset, which a step sent by the API may omit.
-def _set_fields(fields: dict, excluded: set[str]) -> dict:
+def _set_fields(fields: dict, excluded: Set[str]) -> dict:
     return {key: value for key, value in fields.items() if key not in excluded and value is not None}
 
 
@@ -176,10 +208,11 @@ class _Flow:
         self.edges = [edge for edge in (edges if isinstance(edges, list) else []) if isinstance(edge, dict)]
         self._parents: dict[str, set[str]] = {}
         for edge in self.edges:
-            source, target = _edge_endpoints(edge)
-            if source and target:
-                self._parents.setdefault(target, set()).add(source)
+            endpoints = _edge_endpoints(edge)
+            if endpoints.source and endpoints.target:
+                self._parents.setdefault(endpoints.target, set()).add(endpoints.source)
         self._reads: dict[str, Optional[set[str]]] = {}
+        self._run_field_cache: dict[str, dict] = {}
         self._run_texts: dict[str, str] = {}
         self._contexts: dict[str, tuple] = {}
 
@@ -190,28 +223,30 @@ class _Flow:
     def _read_variables(self, step_id: str) -> Optional[set[str]]:
         if step_id not in self._reads:
             action = self.actions[step_id]
-            # A secret input can hold its own address, so its text counts as a read too.
-            texts = [_template_code(action, self._template_cache), self._run_text(step_id)]
+            # A secret input can hold its own address, so its text counts as a read too. The strings are
+            # read before JSON escapes them, because an escape such as `\n` hides the start of a name.
+            texts = [_template_code(action, self._template_cache), *_strings(self._run_fields(step_id))]
             self._reads[step_id] = _referenced_variables(texts)
         return self._reads[step_id]
 
-    def _run_text(self, step_id: str) -> str:
+    def _run_fields(self, step_id: str) -> dict:
         """Everything about a step that changes what its run does, secrets included."""
-        if step_id not in self._run_texts:
+        if step_id not in self._run_field_cache:
             action = self.actions[step_id]
             config = action.get("config") or {}
-            self._run_texts[step_id] = json.dumps(
-                {
-                    **_without_bytecode(_set_fields(action, _DISPLAY_FIELDS | {"config"})),
-                    "config": {
-                        **_without_bytecode(_set_fields(config, {"inputs", "mappings"})),
-                        "inputs": comparable_inputs(self.inputs(step_id)),
-                        "mappings": [comparable_inputs(items) for items in mapping_inputs(config.get("mappings"))],
-                    },
+            self._run_field_cache[step_id] = {
+                **_without_bytecode(_set_fields(action, _DISPLAY_FIELDS | {"config"})),
+                "config": {
+                    **_without_bytecode(_set_fields(config, {"inputs", "mappings"})),
+                    "inputs": comparable_inputs(self.inputs(step_id)),
+                    "mappings": [comparable_inputs(items) for items in mapping_inputs(config.get("mappings"))],
                 },
-                sort_keys=True,
-                default=str,
-            )
+            }
+        return self._run_field_cache[step_id]
+
+    def _run_text(self, step_id: str) -> str:
+        if step_id not in self._run_texts:
+            self._run_texts[step_id] = _typed(self._run_fields(step_id))
         return self._run_texts[step_id]
 
     def _runs_before(self, step_id: str) -> set[str]:
@@ -233,18 +268,18 @@ class _Flow:
             else:
                 before = {other for other in self._runs_before(step_id) if other in self.actions}
                 if not any(_writes_any(self.actions[other], names) for other in before):
-                    self._contexts[step_id] = (_variable_defaults(self.variables, names),)
+                    self._contexts[step_id] = (_typed(_variable_defaults(self.variables, names)),)
                 else:
                     # An earlier step can write a variable the step reads, and which steps run, and in what
                     # order, decides its value. So every earlier step counts, and every default it can read.
                     path = before | {step_id}
                     self._contexts[step_id] = (
-                        _variable_defaults(self.variables, None),
+                        _typed(_variable_defaults(self.variables, None)),
                         sorted((other, self._run_text(other)) for other in before),
                         sorted(
                             json.dumps(edge, sort_keys=True, default=str)
                             for edge in self.edges
-                            if set(_edge_endpoints(edge)) <= path
+                            if (endpoints := _edge_endpoints(edge)).source in path and endpoints.target in path
                         ),
                     )
         return self._contexts[step_id]
@@ -471,7 +506,7 @@ def bind_flow_secret_origins(
         step_outcomes += integration_origin_outcomes(
             team_id,
             flow.secret_config(step_id),
-            lambda step_id=step_id: _connection_kept_unchanged(flow, step_id, connection_sides),
+            partial(_connection_kept_unchanged, flow, step_id, connection_sides),
         )
         if step_outcomes:
             outcomes[step_id] = step_outcomes
@@ -493,7 +528,7 @@ def sends_steered_by_supplied_variables(
     whose code may send it outside its kind's origins, can follow a variable, and a value equal to its
     variable's default changes nothing."""
     defaults = _variable_defaults(variables, None)
-    changed = {str(name) for name, value in supplied.items() if _text(value) != defaults.get(name)}
+    changed = {str(name) for name, value in supplied.items() if not _same_as_default(value, defaults.get(name))}
     if not changed:
         return FlowSecretBinding(outcomes={}, rewrites_secrets=False)
     flow = _Flow(_steps(actions), edges, variables, {}, template_cache)

@@ -3231,9 +3231,11 @@ export interface workflowLogicMeta {
             scheduleStartsAt: string | null,
             saveAttemptedActionIds: string[] | null,
             integrations: IntegrationType[] | null,
-            stepInputRefusals: any
+            stepInputRefusals: Record<string, Record<string, StepInputRefusal>>
         ) => Record<string, HogFlowActionValidationResult | null>
-        pendingSecretRefusal: (stepInputRefusals: any) => StepInputRefusal | null
+        pendingSecretRefusal: (
+            stepInputRefusals: Record<string, Record<string, StepInputRefusal>>
+        ) => StepInputRefusal | null
         workflowHasActionErrors: (
             workflow: HogFlow,
             actionValidationErrorsById: Record<string, HogFlowActionValidationResult | null>
@@ -3998,6 +4000,7 @@ export const workflowLogic = kea<workflowLogicType>([
                     return rest
                 },
                 saveWorkflowSuccess: () => ({}),
+                resetWorkflow: () => ({}),
             },
         ],
         saveAttemptedActionIds: [

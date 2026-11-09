@@ -2,7 +2,11 @@ import { MakeLogicType, actions, connect, kea, key, listeners, path, props } fro
 import posthog from 'posthog-js'
 
 import { lemonToast } from 'lib/lemon-ui/LemonToast'
-import { StepInputRefusal } from 'scenes/hog-functions/configuration/inputRefusal'
+import {
+    SECRET_REENTRY_CODE,
+    StepInputRefusal,
+    parseStepInputRefusal,
+} from 'scenes/hog-functions/configuration/inputRefusal'
 import {
     SecretReentryPrompt,
     SecretReentrySource,
@@ -735,6 +739,13 @@ export interface workflowSecretReentryLogicActions {
     publishDraft: () => {
         value: true
     } // workflowLogic
+    requestStepSecretReentry: (
+        refusal: StepInputRefusal,
+        source: 'publish' | 'save'
+    ) => {
+        refusal: StepInputRefusal
+        source: 'publish' | 'save'
+    } // workflowLogic
     saveWorkflowFailure: (
         error: string,
         errorObject?: any
@@ -812,12 +823,14 @@ export const workflowSecretReentryLogic = kea<workflowSecretReentryLogicType>([
         const cache: WorkflowSecretReentryCache = logicCache
         return {
             requestStepSecretReentry: ({ refusal, source }) => {
-                if (source === 'save') {
+                // A save that stages an entered secret for a publish can be refused for another secret,
+                // and the publish still waits on it.
+                if (source === 'save' && !cache.publishAfterSave) {
                     actions.requireSecretReentry(refusal, source, () => actions.submitWorkflow())
                     return
                 }
                 // The form holds the staged draft, so the entered secret is staged first and then published.
-                actions.requireSecretReentry(refusal, source, () => {
+                actions.requireSecretReentry(refusal, 'publish', () => {
                     cache.publishAfterSave = true
                     actions.submitWorkflow()
                 })
@@ -828,8 +841,10 @@ export const workflowSecretReentryLogic = kea<workflowSecretReentryLogicType>([
                     actions.publishDraft()
                 }
             },
-            saveWorkflowFailure: () => {
-                cache.publishAfterSave = false
+            saveWorkflowFailure: ({ errorObject }) => {
+                if (parseStepInputRefusal(errorObject)?.code !== SECRET_REENTRY_CODE) {
+                    cache.publishAfterSave = false
+                }
             },
             requireSecretReentry: ({ refusal, source, onContinue }) => {
                 if (values.isOpen) {
@@ -853,6 +868,7 @@ export const workflowSecretReentryLogic = kea<workflowSecretReentryLogicType>([
                 posthog.capture('workflow secret reentry shown', trackingProperties(prompt))
             },
             cancelSecretReentry: () => {
+                cache.publishAfterSave = false
                 if (values.prompt) {
                     // pinned: analytics event name - renaming breaks dashboards
                     posthog.capture('workflow secret reentry cancelled', trackingProperties(values.prompt))

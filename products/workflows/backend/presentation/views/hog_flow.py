@@ -281,11 +281,11 @@ from products.workflows.backend.facade.secrets import (
     bind_flow_secret_origins,
     count_origin_outcomes,
     entered_secret_keys,
+    input_refusals,
     mask_workflow_fields,
     merge_secret_maps,
     plaintext_secret_map,
     recover_or_drop_masked_inputs,
-    refusal_errors,
     rehydrate_flow_secrets,
     secret_binding_enforced,
     secret_keys_for_action,
@@ -619,7 +619,13 @@ def settle_flow_secret_bindings(context: dict, binding: FlowSecretBinding) -> No
     surface = f"workflow_{getattr(context.get('view'), 'action', None) or 'internal'}"
     count_origin_outcomes(checked, surface, enforced=enforce, stages_draft=False)
     if enforce:
-        refused = {step_id: refusal_errors(outcomes) for step_id, outcomes in binding.outcomes.items()}
+        refused = {
+            step_id: {
+                key: exceptions.ErrorDetail(refusal.message, code=refusal.code)
+                for key, refusal in input_refusals(outcomes).items()
+            }
+            for step_id, outcomes in binding.outcomes.items()
+        }
         raise serializers.ValidationError(
             {"actions": {step_id: {"inputs": errors} for step_id, errors in refused.items() if errors}}
         )
@@ -7671,13 +7677,18 @@ class HogFlowViewSet(
             audience_cohort = realtime_audience_cohort(self.team.project_id, hog_flow.trigger_filters)
             if audience_cohort is not None and not audience_cohort.can_finish:
                 raise exceptions.ValidationError(realtime_cohort_cant_finish_error(audience_cohort))
-            self._require_replay_vision_caller_access(request, self._edit_state().actions)
+            edit_state = self._edit_state()
+            self._require_replay_vision_caller_access(request, edit_state.actions)
+            variables = serializer.validated_data.get("variables", {})
+            # The worker reads a run's variables only as an object, so other shapes steer nothing.
+            supplied = variables if isinstance(variables, dict) else {}
+            self._refuse_sends_steered_by_supplied_variables(edit_state, None, supplied, {})
 
             batch_job = create_batch_job(
                 team_id=self.team_id,
                 hog_flow_id=hog_flow.id,
                 created_by_id=cast(User, request.user).id,
-                variables=serializer.validated_data.get("variables", {}),
+                variables=variables,
                 status=serializer.validated_data.get("status"),
                 # The consumer fans out to the trigger's stored filters, so snapshot those on the job -
                 # caller-supplied filters are never what actually runs.

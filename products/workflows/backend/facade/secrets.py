@@ -2,12 +2,8 @@
 and folded back in for inline test runs, and each one bound, with each connection, to the origins its
 step may send it to."""
 
-from products.cdp.backend.secret_binding import (
-    SecretBinding,
-    count_origin_outcomes,
-    refusal_errors,
-    secret_binding_enforced,
-)
+from products.cdp.backend.facade.contracts import SecretBinding
+from products.cdp.backend.facade.secret_origins import count_origin_outcomes, input_refusals, secret_binding_enforced
 from products.workflows.backend.facade.contracts import FlowSecretBinding
 from products.workflows.backend.services.hog_flow_secret_origins import (
     bind_flow_secret_origins,
@@ -33,7 +29,7 @@ from products.workflows.backend.services.hog_flow_secrets import (
 __all__ = [
     "SecretBinding",
     "count_origin_outcomes",
-    "refusal_errors",
+    "input_refusals",
     "secret_binding_enforced",
     "FlowSecretBinding",
     "TemplateCache",

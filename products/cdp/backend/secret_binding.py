@@ -6,6 +6,7 @@ from dataclasses import field
 from enum import StrEnum
 from functools import cache
 from typing import Any, Optional
+from uuid import UUID
 
 import posthoganalytics
 from prometheus_client import Counter
@@ -14,6 +15,7 @@ from rest_framework.exceptions import ErrorDetail
 from posthog.dataclasses import frozen
 from posthog.integrations import IntegrationKind, IntegrationManager
 
+from products.cdp.backend.facade.contracts import InputRefusal, OriginCheck, OriginOutcome, SecretBinding
 from products.cdp.backend.integration_origins import (
     integration_inputs,
     integration_origins,
@@ -35,14 +37,6 @@ SECRET_HOST_BINDING_COUNTER = Counter(
 )
 
 
-class SecretBinding(StrEnum):
-    BOUND = "bound"
-    KEPT = "kept"
-    REFUSED = "refused"
-    # An integration whose code sends its credentials only to the origins of its kind.
-    WITHIN = "within"
-
-
 class SecretBindingMetric(StrEnum):
     BOUND = "bound"
     KEPT = "kept"
@@ -58,12 +52,6 @@ def binding_metric(outcome: SecretBinding, let_through: bool, stages_draft: bool
     return SecretBindingMetric.STAGED if stages_draft else SecretBindingMetric.WOULD_REFUSE
 
 
-class OriginCheck(StrEnum):
-    SECRET = "secret"
-    INTEGRATION = "integration"
-    INTEGRATION_UNLISTED = "integration_unlisted"
-
-
 # A key refused by several checks shows the error of the first check here. Entering the secret again
 # does not fix an integration refusal, so those go first and the user does not retype for nothing.
 REFUSAL_CODES: dict[OriginCheck, str] = {
@@ -73,38 +61,32 @@ REFUSAL_CODES: dict[OriginCheck, str] = {
 }
 
 
-@frozen
-class OriginOutcome:
-    key: str
-    check: OriginCheck
-    binding: SecretBinding
-    # The integration kind, or "" for a secret. It labels the metric, so only a known kind is kept.
-    kind: str = ""
-    # What a refusal tells the user, set only when the binding is refused.
-    message: str = ""
-
-    def metric_outcome(self, enforced: bool, stages_draft: bool) -> str:
-        let_through = self.binding == SecretBinding.REFUSED and not enforced
-        metric = binding_metric(self.binding, let_through, stages_draft)
-        return metric if self.check == OriginCheck.SECRET else f"{self.check}_{metric}"
+def _metric_outcome(item: OriginOutcome, enforced: bool, stages_draft: bool) -> str:
+    let_through = item.binding == SecretBinding.REFUSED and not enforced
+    metric = binding_metric(item.binding, let_through, stages_draft)
+    return metric if item.check == OriginCheck.SECRET else f"{item.check}_{metric}"
 
 
 def count_origin_outcomes(outcomes: Iterable[OriginOutcome], surface: str, enforced: bool, stages_draft: bool) -> None:
     for item in outcomes:
         SECRET_HOST_BINDING_COUNTER.labels(
-            outcome=item.metric_outcome(enforced, stages_draft), surface=surface, kind=item.kind
+            outcome=_metric_outcome(item, enforced, stages_draft), surface=surface, kind=item.kind
         ).inc()
 
 
-def refusal_errors(outcomes: Iterable[OriginOutcome]) -> dict[str, ErrorDetail]:
-    """The error for each refused key, from the first check in `REFUSAL_CODES` that refused it."""
+def input_refusals(outcomes: Iterable[OriginOutcome]) -> dict[str, InputRefusal]:
+    """The refusal for each refused key, from the first check in `REFUSAL_CODES` that refused it."""
     outcomes = list(outcomes)
-    errors: dict[str, ErrorDetail] = {}
+    refusals: dict[str, InputRefusal] = {}
     for check, code in REFUSAL_CODES.items():
         for item in outcomes:
             if item.check == check and item.binding == SecretBinding.REFUSED:
-                errors.setdefault(item.key, ErrorDetail(item.message, code=code))
-    return errors
+                refusals.setdefault(item.key, InputRefusal(message=item.message, code=code))
+    return refusals
+
+
+def refusal_errors(outcomes: Iterable[OriginOutcome]) -> dict[str, ErrorDetail]:
+    return {key: ErrorDetail(refusal.message, code=refusal.code) for key, refusal in input_refusals(outcomes).items()}
 
 
 def comparable_inputs(items: Any) -> dict:
@@ -226,11 +208,15 @@ def secret_binding_enforced(context: Mapping[str, Any]) -> bool:
     if context.get("view") is None:
         return False
     team = context["get_team"]()
+    return secret_host_binding_on(team.uuid, team.organization_id)
+
+
+def secret_host_binding_on(team_uuid: UUID, organization_id: UUID) -> bool:
     return bool(
         posthoganalytics.feature_enabled(
             SECRET_HOST_BINDING_FLAG,
-            str(team.uuid),
-            groups={"organization": str(team.organization_id)},
+            str(team_uuid),
+            groups={"organization": str(organization_id)},
             send_feature_flag_events=False,
         )
     )

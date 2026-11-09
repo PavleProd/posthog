@@ -49,6 +49,7 @@ from posthog.scopes import APIScopeObject
 from products.batch_exports.backend.facade import api as batch_exports_api
 from products.batch_exports.backend.facade.contracts import InvalidBatchExportFilters
 from products.cdp.backend.api.hog_function_template import HogFunctionTemplateSerializer
+from products.cdp.backend.facade.contracts import OriginCheck, OriginOutcome, SecretBinding
 from products.cdp.backend.filters import DATA_WAREHOUSE_SOURCES
 from products.cdp.backend.internal_events import (
     generic_api_editable_alert_scope,
@@ -73,9 +74,6 @@ from products.cdp.backend.presentation.hog_invocations.rerun import (
 )
 from products.cdp.backend.secret_binding import (
     REFUSAL_CODES,
-    OriginCheck,
-    OriginOutcome,
-    SecretBinding,
     SecretConfig,
     comparable_config,
     count_origin_outcomes,

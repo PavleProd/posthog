@@ -1,13 +1,13 @@
 """Bind every live secret input of a workflow step to the origins its template code can send it to.
 
-The hog function backfill in `products.cdp.backend.services.secret_origins_backfill` does the same for
+The hog function backfill in `products.cdp.backend.facade.secret_origins` does the same for
 hog functions, and its rules hold here: an entry that already has `allowed_origins` stays as it is, and
 secrets a draft stages stay unbound, so publishing or testing the draft checks them against the live step.
 """
 
 from typing import Optional
 
-from products.cdp.backend.services.secret_origins_backfill import (
+from products.cdp.backend.facade.secret_origins import (
     BackfillPlan,
     BackfillReport,
     BackfillSource,

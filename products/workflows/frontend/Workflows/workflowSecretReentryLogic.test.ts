@@ -2,6 +2,7 @@ import { expectLogic } from 'kea-test-utils'
 
 import { lemonToast } from '@posthog/lemon-ui'
 
+import { StepInputRefusal } from 'scenes/hog-functions/configuration/inputRefusal'
 import { secretReentryDialogLogic } from 'scenes/hog-functions/configuration/secretReentryDialogLogic'
 
 import { useMocks } from '~/mocks/jest'
@@ -77,6 +78,13 @@ const refusal = (code: string, key: string, detail: string): Record<string, stri
     detail,
 })
 
+const stepRefusal = (key: string): StepInputRefusal => ({
+    stepId: 'webhook',
+    key,
+    detail: SECRET_DETAIL,
+    code: 'secret_reentry_required',
+})
+
 describe('workflowSecretReentryLogic', () => {
     let logic: ReturnType<typeof workflowLogic.build>
     let dialog: ReturnType<typeof secretReentryDialogLogic.build>
@@ -150,6 +158,32 @@ describe('workflowSecretReentryLogic', () => {
 
         logic.actions.submitWorkflow()
         expect(dialog.values.isOpen).toBe(true)
+    })
+
+    it('keeps publishing when the save of an entered secret is refused for another secret', async () => {
+        logic.actions.setStepInputRefusal(stepRefusal('api_key'))
+        logic.actions.publishDraft()
+        expect(dialog.values.prompt?.source).toEqual('publish')
+
+        refusals.push(refusal('secret_reentry_required', 'api_key', SECRET_DETAIL))
+        dialog.actions.setSecretValue('first key')
+        await expectLogic(logic, () => dialog.actions.confirmSecretReentry()).toDispatchActions(['saveWorkflowFailure'])
+        expect(dialog.values.prompt?.source).toEqual('publish')
+
+        dialog.actions.setSecretValue('second key')
+        await expectLogic(logic, () => dialog.actions.confirmSecretReentry()).toDispatchActions([
+            'saveWorkflowSuccess',
+            'publishDraft',
+        ])
+    })
+
+    it('forgets refused secrets when the changes are discarded', async () => {
+        logic.actions.setStepInputRefusal(stepRefusal('api_key'))
+        logic.actions.resetWorkflow(logic.values.originalWorkflow ?? undefined)
+
+        expect(logic.values.actionValidationErrorsById['webhook']?.errors?.api_key).toBeUndefined()
+        logic.actions.submitWorkflow()
+        expect(dialog.values.isOpen).toBe(false)
     })
 
     it('shows a refused connection on its input, with no dialog and no toast', async () => {

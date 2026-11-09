@@ -665,11 +665,11 @@ export interface hogFunctionConfigurationLogicActions {
     setShowSource: (showSource: boolean) => {
         showSource: boolean
     }
-    showConnectionRefusal: (refusal: InputRefusal) => {
-        refusal: InputRefusal
-    }
     setUnsavedConfiguration: (configuration: HogFunctionConfigurationType | null) => {
         configuration: HogFunctionConfigurationType | null
+    }
+    showConnectionRefusal: (refusal: InputRefusal) => {
+        refusal: InputRefusal
     }
     sparklineQueryChanged: (sparklineQuery: TrendsQuery) => {
         sparklineQuery: TrendsQuery
