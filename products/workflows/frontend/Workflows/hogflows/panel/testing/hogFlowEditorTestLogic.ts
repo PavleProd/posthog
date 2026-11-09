@@ -25,6 +25,7 @@ import { dayjs } from 'lib/dayjs'
 import { groupsAccessLogic } from 'lib/introductions/groupsAccessLogic'
 import { escapePropertyAsHogQLIdentifier, hogql } from 'lib/utils/hogql'
 import { FEATURE_FLAG_CALLED_EVENT } from 'scenes/feature-flags/flagEvaluationsTable'
+import { SECRET_REENTRY_CODE, parseStepInputRefusal } from 'scenes/hog-functions/configuration/inputRefusal'
 import {
     FLAG_CALLS_NOT_LOADABLE,
     exampleFlagCall,
@@ -50,6 +51,7 @@ import {
 
 import { WorkflowLogicProps, workflowLogic } from '../../../workflowLogic'
 import type { TriggerAction } from '../../../workflowLogic'
+import { workflowSecretReentryLogic } from '../../../workflowSecretReentryLogic'
 import { hogFlowEditorLogic } from '../../hogFlowEditorLogic'
 import type { HogFlowEditorMode } from '../../hogFlowEditorLogic'
 import { isSlackMessageTriggerConfig } from '../../registry/triggers/slackTriggerFilters'
@@ -204,6 +206,18 @@ export interface hogFlowEditorTestLogicActions {
     setSelectedNodeId: (selectedNodeId: string | null) => {
         selectedNodeId: string | null
     } // hogFlowEditorLogic
+    setStepInputRefusal: (refusal: import('scenes/hog-functions/configuration/inputRefusal').StepInputRefusal) => {
+        refusal: import('scenes/hog-functions/configuration/inputRefusal').StepInputRefusal
+    } // workflowLogic
+    requireSecretReentry: (
+        refusal: import('scenes/hog-functions/configuration/inputRefusal').StepInputRefusal,
+        source: import('scenes/hog-functions/configuration/secretReentryDialogLogic').SecretReentrySource,
+        onContinue: () => void
+    ) => {
+        onContinue: () => void
+        refusal: import('scenes/hog-functions/configuration/inputRefusal').StepInputRefusal
+        source: import('scenes/hog-functions/configuration/secretReentryDialogLogic').SecretReentrySource
+    } // workflowSecretReentryLogic
     cancelSampleGlobalsLoading: () => {
         value: true
     }
@@ -1056,7 +1070,14 @@ export const hogFlowEditorTestLogic = kea<hogFlowEditorTestLogicType>([
             teamLogic,
             ['currentTeam'],
         ],
-        actions: [hogFlowEditorLogic, ['setSelectedNodeId']],
+        actions: [
+            hogFlowEditorLogic,
+            ['setSelectedNodeId'],
+            workflowLogic(props),
+            ['setStepInputRefusal'],
+            workflowSecretReentryLogic(props),
+            ['requireSecretReentry'],
+        ],
     })),
     actions({
         setTestResult: (testResult: HogflowTestResult | null) => ({ testResult }),
@@ -1543,6 +1564,14 @@ export const hogFlowEditorTestLogic = kea<hogFlowEditorTestLogicType>([
 
                     return values.testInvocation
                 } catch (error: any) {
+                    const refusal = parseStepInputRefusal(error)
+                    if (refusal) {
+                        actions.setStepInputRefusal(refusal)
+                        if (refusal.code === SECRET_REENTRY_CODE) {
+                            actions.requireSecretReentry(refusal, 'test', () => actions.submitTestInvocation())
+                        }
+                        throw error
+                    }
                     console.error('Workflow test error:', error)
                     lemonToast.error('Error testing workflow')
                     throw error

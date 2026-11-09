@@ -24,14 +24,10 @@ import {
     hogFunctionConfigurationLogic,
     sanitizeConfiguration,
 } from './hogFunctionConfigurationLogic'
-import {
-    EnteredSecretInputs,
-    SecretReentryConfiguration,
-    SecretReentrySource,
-    hogFunctionSecretReentryLogic,
-} from './hogFunctionSecretReentryLogic'
+import { hogFunctionSecretReentryLogic } from './hogFunctionSecretReentryLogic'
 import { InputRefusal, parseConnectionRefusal, parseSecretReentryRefusal } from './inputRefusal'
 import { SAMPLE_GLOBALS_CONTEXTS } from './sampleGlobalsContexts'
+import { EnteredSecretInputs, SecretReentryConfiguration, SecretReentrySource } from './secretReentryDialogLogic'
 
 export type HogFunctionTestInvocationForm = {
     globals: string // CyclotronJobInvocationGlobals

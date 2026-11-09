@@ -19,13 +19,9 @@ import type { HogFunctionApi, HogFunctionPublishResponseApi } from 'products/cdp
 import { buildHogFunctionDraftDiff } from './hogFunctionConfigDiffUtils'
 import { HogFunctionConfigurationLogicProps, hogFunctionConfigurationLogic } from './hogFunctionConfigurationLogic'
 import { openHogFunctionPublishDraftDialog } from './HogFunctionPublishDraftDialog'
-import {
-    EnteredSecretInputs,
-    SecretReentryConfiguration,
-    SecretReentrySource,
-    hogFunctionSecretReentryLogic,
-} from './hogFunctionSecretReentryLogic'
+import { hogFunctionSecretReentryLogic } from './hogFunctionSecretReentryLogic'
 import { InputRefusal, parseConnectionRefusal, parseSecretReentryRefusal } from './inputRefusal'
+import { EnteredSecretInputs, SecretReentryConfiguration, SecretReentrySource } from './secretReentryDialogLogic'
 
 export type HogFunctionDraftAction = 'publish' | 'discard'
 

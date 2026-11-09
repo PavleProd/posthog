@@ -19,6 +19,11 @@ import { type FeatureFlagsSet, featureFlagLogic } from 'lib/logic/featureFlagLog
 import { publicWebhooksHostOrigin } from 'lib/utils/apiHost'
 import { objectsEqual } from 'lib/utils/objects'
 import { sanitizeInputs } from 'scenes/hog-functions/configuration/hogFunctionConfigurationLogic'
+import {
+    SECRET_REENTRY_CODE,
+    StepInputRefusal,
+    parseStepInputRefusal,
+} from 'scenes/hog-functions/configuration/inputRefusal'
 import type { EmailFieldErrors } from 'scenes/hog-functions/email-templater/types'
 import { projectLogic } from 'scenes/projectLogic'
 import { teamLogic } from 'scenes/teamLogic'
@@ -452,6 +457,7 @@ export interface workflowLogicValues {
           }
         | false
         | null
+    pendingSecretRefusal: StepInputRefusal | null
     publishDisabledReason: string | undefined
     resumeEmailSendingPending: boolean
     saveAttemptedActionIds: string[] | null
@@ -468,6 +474,7 @@ export interface workflowLogicValues {
     showDraftActions: boolean
     showWorkflowErrors: boolean
     statusToggleDisabledReason: string | undefined
+    stepInputRefusals: Record<string, Record<string, StepInputRefusal>>
     triggerAction: TriggerAction | null
     workflow: HogFlow
     workflowAllErrors: Record<string, any>
@@ -2689,6 +2696,13 @@ export interface workflowLogicActions {
     replayDeferredResourceEdited: () => {
         value: true
     }
+    requestStepSecretReentry: (
+        refusal: StepInputRefusal,
+        source: 'publish' | 'save'
+    ) => {
+        refusal: StepInputRefusal
+        source: 'publish' | 'save'
+    }
     resetWorkflow: (values?: HogFlow) => {
         values?: HogFlow
     }
@@ -2762,6 +2776,9 @@ export interface workflowLogicActions {
     }
     setSchedules: (schedules: HogFlowSchedule[]) => {
         schedules: HogFlowSchedule[]
+    }
+    setStepInputRefusal: (refusal: StepInputRefusal) => {
+        refusal: StepInputRefusal
     }
     setSyncingExternalEdit: (syncing: boolean) => {
         syncing: boolean
@@ -3213,8 +3230,10 @@ export interface workflowLogicMeta {
             hogFunctionTemplatesByIdLoading: boolean,
             scheduleStartsAt: string | null,
             saveAttemptedActionIds: string[] | null,
-            integrations: IntegrationType[] | null
+            integrations: IntegrationType[] | null,
+            stepInputRefusals: any
         ) => Record<string, HogFlowActionValidationResult | null>
+        pendingSecretRefusal: (stepInputRefusals: any) => StepInputRefusal | null
         workflowHasActionErrors: (
             workflow: HogFlow,
             actionValidationErrorsById: Record<string, HogFlowActionValidationResult | null>
@@ -3496,6 +3515,9 @@ export const workflowLogic = kea<workflowLogicType>([
         confirmResumeEmailSending: true,
         setResumeEmailSendingPending: (pending: boolean) => ({ pending }),
         markAiEmailDraftApplied: true,
+        setStepInputRefusal: (refusal: StepInputRefusal) => ({ refusal }),
+        // Asks for a refused secret in a dialog. Only the user's own save or publish asks, never an auto-save.
+        requestStepSecretReentry: (refusal: StepInputRefusal, source: 'save' | 'publish') => ({ refusal, source }),
     }),
     loaders(({ props, values, actions, cache }) => ({
         aiEmailDraft: [
@@ -3960,6 +3982,24 @@ export const workflowLogic = kea<workflowLogicType>([
         // and enable-gate work), but a step only shows its messages once the user has tried to
         // save or enable with that step in place, which is the point where they can act on them.
         // A step added later stays quiet until the next attempt.
+        // Inputs the server refused to send a credential through, by step id and input key.
+        stepInputRefusals: [
+            {} as Record<string, Record<string, StepInputRefusal>>,
+            {
+                setStepInputRefusal: (state, { refusal }) => ({
+                    ...state,
+                    [refusal.stepId]: { ...state[refusal.stepId], [refusal.key]: refusal },
+                }),
+                setWorkflowActionConfig: (state, { actionId }) => {
+                    if (!(actionId in state)) {
+                        return state
+                    }
+                    const { [actionId]: _, ...rest } = state
+                    return rest
+                },
+                saveWorkflowSuccess: () => ({}),
+            },
+        ],
         saveAttemptedActionIds: [
             null as string[] | null,
             {
@@ -4130,6 +4170,7 @@ export const workflowLogic = kea<workflowLogicType>([
                 s.scheduleStartsAt,
                 s.saveAttemptedActionIds,
                 s.integrations,
+                s.stepInputRefusals,
             ],
             (
                 workflow: HogFlow,
@@ -4137,7 +4178,8 @@ export const workflowLogic = kea<workflowLogicType>([
                 hogFunctionTemplatesByIdLoading: boolean,
                 scheduleStartsAt: string | null,
                 saveAttemptedActionIds: string[] | null,
-                integrations: IntegrationType[] | null
+                integrations: IntegrationType[] | null,
+                stepInputRefusals: Record<string, Record<string, StepInputRefusal>>
             ): Record<string, HogFlowActionValidationResult | null> => {
                 // Warehouse- and Slack-triggered workflows are person-less ("row-scoped").
                 // Person-dependent step types make no sense without a person, so we block them at
@@ -4305,6 +4347,15 @@ export const workflowLogic = kea<workflowLogicType>([
                             }
                         }
 
+                        const refusals = Object.values(stepInputRefusals[action.id] ?? {})
+                        if (refusals.length) {
+                            result.valid = false
+                            result.errors = {
+                                ...result.errors,
+                                ...Object.fromEntries(refusals.map((refusal) => [refusal.key, refusal.detail])),
+                            }
+                        }
+
                         acc[action.id] = result
                         return acc
                     },
@@ -4313,6 +4364,13 @@ export const workflowLogic = kea<workflowLogicType>([
             },
         ],
 
+        pendingSecretRefusal: [
+            (s) => [s.stepInputRefusals],
+            (stepInputRefusals: Record<string, Record<string, StepInputRefusal>>): StepInputRefusal | null =>
+                Object.values(stepInputRefusals)
+                    .flatMap((refusals) => Object.values(refusals))
+                    .find((refusal) => refusal.code === SECRET_REENTRY_CODE) ?? null,
+        ],
         workflowHasActionErrors: [
             (s) => [s.workflow, s.actionValidationErrorsById],
             (
@@ -4514,6 +4572,10 @@ export const workflowLogic = kea<workflowLogicType>([
             if (!props.id || props.id === 'new' || values.draftActionPending) {
                 return
             }
+            if (values.pendingSecretRefusal) {
+                actions.requestStepSecretReentry(values.pendingSecretRefusal, 'publish')
+                return
+            }
             actions.setDraftActionPending('publish')
             let preview
             try {
@@ -4543,9 +4605,17 @@ export const workflowLogic = kea<workflowLogicType>([
                 await api.hogFlows.publishHogFlow(props.id, { confirm: true, confirm_token: confirmToken })
                 lemonToast.success('Changes published')
                 actions.loadWorkflow()
-            } catch {
-                // Covers a stale/expired token (the draft moved since the preview) and plain failures.
-                lemonToast.error('Publishing failed. Review the staged changes and try again.')
+            } catch (error) {
+                const refusal = parseStepInputRefusal(error)
+                if (refusal) {
+                    actions.setStepInputRefusal(refusal)
+                    if (refusal.code === SECRET_REENTRY_CODE) {
+                        actions.requestStepSecretReentry(refusal, 'publish')
+                    }
+                } else {
+                    // Covers a stale/expired token (the draft moved since the preview) and plain failures.
+                    lemonToast.error('Publishing failed. Review the staged changes and try again.')
+                }
                 actions.loadWorkflow()
             } finally {
                 actions.setDraftActionPending(null)
@@ -4636,6 +4706,10 @@ export const workflowLogic = kea<workflowLogicType>([
         },
         submitWorkflow: () => {
             actions.markSaveAttempted(values.workflow.actions.map((action) => action.id))
+            // A refused secret marks its step invalid, which holds the save back, so ask for it here.
+            if (values.pendingSecretRefusal) {
+                actions.requestStepSecretReentry(values.pendingSecretRefusal, 'save')
+            }
         },
         saveWorkflowPartial: async ({ workflow }) => {
             // Recorded before the error guard: an enable attempt on an invalid draft must still
@@ -4701,9 +4775,16 @@ export const workflowLogic = kea<workflowLogicType>([
             }
             actions.replayDeferredResourceEdited()
         },
-        saveWorkflowFailure: () => {
+        saveWorkflowFailure: ({ errorObject }) => {
             // Keep the queue aligned with the saves still in flight.
-            ;(cache.saveContexts as SaveContext[] | undefined)?.shift()
+            const saveContext = (cache.saveContexts as SaveContext[] | undefined)?.shift()
+            const refusal = parseStepInputRefusal(errorObject)
+            if (refusal) {
+                actions.setStepInputRefusal(refusal)
+                if (refusal.code === SECRET_REENTRY_CODE && !(saveContext?.initiatedByAutoSave ?? values.isAutoSave)) {
+                    actions.requestStepSecretReentry(refusal, 'save')
+                }
+            }
             cache.enablingWorkflow = false
             actions.replayDeferredResourceEdited()
         },

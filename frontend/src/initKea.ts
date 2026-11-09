@@ -251,11 +251,13 @@ const GITHUB_REPOSITORY_INACCESSIBLE_SELF_HANDLED_BY_LOGIC_PATH: Record<string, 
 Write actions whose owning logic handles a 400 that refuses to send a credential to a new host: it asks for
 the secret again (`secret_reentry_required`), or marks the connection input (`integration_origin_refused`).
 The 400 asks for user input, so it is not reported as an exception. Owned by hogFunctionSecretReentryLogic's
-and hogFunctionConfigurationLogic's upsertHogFunctionFailure listeners. The backend raises the codes in
-products/cdp/backend/api/hog_function.py.
+and hogFunctionConfigurationLogic's upsertHogFunctionFailure listeners, and workflowLogic's saveWorkflowFailure
+listener. The backend raises the codes in products/cdp/backend/api/hog_function.py and
+products/workflows/backend/presentation/views/hog_flow.py.
 */
 const ORIGIN_REFUSAL_SELF_HANDLED_BY_LOGIC_PATH: Record<string, string> = {
     upsertHogFunction: 'scenes.pipeline.hogFunctionConfigurationLogic',
+    saveWorkflow: 'products.workflows.frontend.Workflows.workflowLogic',
 }
 const ORIGIN_REFUSAL_CODES = new Set(['secret_reentry_required', 'integration_origin_refused'])
 

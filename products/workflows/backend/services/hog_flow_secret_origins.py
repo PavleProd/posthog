@@ -151,6 +151,11 @@ def _edge_endpoints(edge: Any) -> tuple[Optional[str], Optional[str]]:
     return _text(edge.get("from")), _text(edge.get("to"))
 
 
+# A stored step holds a null for each field it leaves unset, which a step sent by the API may omit.
+def _set_fields(fields: dict, excluded: set[str]) -> dict:
+    return {key: value for key, value in fields.items() if key not in excluded and value is not None}
+
+
 class _Flow:
     """One side of a workflow, as the worker would run it, with what each step's run depends on."""
 
@@ -197,9 +202,9 @@ class _Flow:
             config = action.get("config") or {}
             self._run_texts[step_id] = json.dumps(
                 {
-                    **_without_bytecode({k: v for k, v in action.items() if k not in _DISPLAY_FIELDS | {"config"}}),
+                    **_without_bytecode(_set_fields(action, _DISPLAY_FIELDS | {"config"})),
                     "config": {
-                        **_without_bytecode({k: v for k, v in config.items() if k not in {"inputs", "mappings"}}),
+                        **_without_bytecode(_set_fields(config, {"inputs", "mappings"})),
                         "inputs": comparable_inputs(self.inputs(step_id)),
                         "mappings": [comparable_inputs(items) for items in mapping_inputs(config.get("mappings"))],
                     },

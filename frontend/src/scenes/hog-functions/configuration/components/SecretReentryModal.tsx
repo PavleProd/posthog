@@ -4,20 +4,23 @@ import { LemonButton, LemonInput, LemonModal } from '@posthog/lemon-ui'
 
 import { LemonField } from 'lib/lemon-ui/LemonField'
 
-import { hogFunctionConfigurationLogic } from '../hogFunctionConfigurationLogic'
-import { SecretReentrySource, hogFunctionSecretReentryLogic } from '../hogFunctionSecretReentryLogic'
+import { SecretReentrySource, secretReentryDialogLogic } from '../secretReentryDialogLogic'
 
-const SECRET_INPUT_ID = 'hog-function-secret-reentry-value'
+const SECRET_INPUT_ID = 'secret-reentry-value'
 
-const CONFIRM_LABELS: Record<SecretReentrySource, string> = {
-    save: 'Save',
-    test: 'Test function',
-    publish: 'Publish',
+export interface SecretReentryModalProps {
+    dialogKey: string
+    confirmLabels: Record<SecretReentrySource, string>
+    // pinned: data-attr value - autocapture dashboards and Playwright select on it
+    confirmDataAttr: string
 }
 
-export function HogFunctionSecretReentryModal(): JSX.Element {
-    const { logicProps } = useValues(hogFunctionConfigurationLogic)
-    const logic = hogFunctionSecretReentryLogic(logicProps)
+export function SecretReentryModal({
+    dialogKey,
+    confirmLabels,
+    confirmDataAttr,
+}: SecretReentryModalProps): JSX.Element {
+    const logic = secretReentryDialogLogic({ dialogKey })
     const { isOpen, prompt, secretValue, secretEntryValues, confirmDisabledReason } = useValues(logic)
     const { setSecretValue, setSecretEntry, cancelSecretReentry, confirmSecretReentry, clearSecretReentry } =
         useActions(logic)
@@ -42,9 +45,9 @@ export function HogFunctionSecretReentryModal(): JSX.Element {
                         type="primary"
                         onClick={confirmSecretReentry}
                         disabledReason={confirmDisabledReason}
-                        data-attr="hog-function-secret-reentry-confirm"
+                        data-attr={confirmDataAttr}
                     >
-                        {CONFIRM_LABELS[prompt?.source ?? 'save']}
+                        {confirmLabels[prompt?.source ?? 'save']}
                     </LemonButton>
                 </>
             }

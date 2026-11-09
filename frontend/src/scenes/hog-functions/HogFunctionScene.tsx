@@ -11,6 +11,7 @@ import {
     reducers,
     selectors,
     useActions,
+    useMountedLogic,
     useValues,
 } from 'kea'
 import { actionToUrl, router, urlToAction } from 'kea-router'
@@ -54,9 +55,13 @@ import {
     HogFunctionConfigurationClearChangesButton,
     HogFunctionConfigurationSaveButton,
 } from './configuration/components/HogFunctionConfigurationButtons'
-import { HogFunctionSecretReentryModal } from './configuration/components/HogFunctionSecretReentryModal'
+import { SecretReentryModal } from './configuration/components/SecretReentryModal'
 import { HogFunctionIconEditable } from './configuration/HogFunctionIcon'
 import { HogFunctionPublishDraftButton } from './configuration/HogFunctionPublishDraftButton'
+import {
+    hogFunctionSecretReentryDialogKey,
+    hogFunctionSecretReentryLogic,
+} from './configuration/hogFunctionSecretReentryLogic'
 import { humanizeHogFunctionType } from './hog-function-utils'
 import { HogInvocations } from './invocations/HogInvocations'
 import { TransformationInvocations } from './invocations/TransformationInvocations'
@@ -496,12 +501,15 @@ function HogFunctionHeader(): JSX.Element {
     )
 }
 
+const HOG_FUNCTION_SECRET_REENTRY_CONFIRM_LABELS = { save: 'Save', test: 'Test function', publish: 'Publish' }
+
 export function HogFunctionScene(): JSX.Element {
     const { currentTab, loading, loaded, logicProps, type, supportsBackfills } = useValues(hogFunctionSceneLogic)
     const { setCurrentTab } = useActions(hogFunctionSceneLogic)
     const { featureFlags } = useValues(featureFlagLogic)
 
     const { id, templateId, subTemplateId } = logicProps
+    useMountedLogic(hogFunctionSecretReentryLogic(logicProps as HogFunctionConfigurationLogicProps))
 
     useFileSystemLogView({
         type: `hog_function/${type ?? ''}`,
@@ -596,7 +604,11 @@ export function HogFunctionScene(): JSX.Element {
         <SceneContent>
             <BindLogic logic={hogFunctionConfigurationLogic} props={logicProps}>
                 <HogFunctionHeader />
-                <HogFunctionSecretReentryModal />
+                <SecretReentryModal
+                    dialogKey={hogFunctionSecretReentryDialogKey(logicProps)}
+                    confirmLabels={HOG_FUNCTION_SECRET_REENTRY_CONFIRM_LABELS}
+                    confirmDataAttr="hog-function-secret-reentry-confirm"
+                />
                 {templateId ? (
                     <HogFunctionConfiguration templateId={templateId} subTemplateId={subTemplateId} />
                 ) : (

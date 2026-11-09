@@ -10,6 +10,7 @@ import { NotFound } from 'lib/components/NotFound'
 import { useDebouncedValue } from 'lib/hooks/useDebouncedValue'
 import { LemonTab, LemonTabs } from 'lib/lemon-ui/LemonTabs'
 import { useAttachedLogic } from 'lib/logic/scenes/useAttachedLogic'
+import { SecretReentryModal } from 'scenes/hog-functions/configuration/components/SecretReentryModal'
 import { AI_FIRST_COMPOSER_OVERRIDE } from 'scenes/max/aiFirstCreate/aiFirstMode'
 import { sceneAgentPanelLogic } from 'scenes/max/sceneAgentPanelLogic'
 import { useSceneAgentPanel } from 'scenes/max/useSceneAgentPanel'
@@ -53,6 +54,7 @@ import { WorkflowMetrics } from './WorkflowMetrics'
 import { WorkflowRevisions } from './WorkflowRevisions'
 import { WorkflowSceneHeader } from './WorkflowSceneHeader'
 import { WorkflowSceneLogicProps, WorkflowTab, workflowSceneLogic } from './workflowSceneLogic'
+import { workflowSecretReentryDialogKey, workflowSecretReentryLogic } from './workflowSecretReentryLogic'
 import { TRIGGER_PREFILL_PARAM } from './workflowTriggerPrefill'
 
 export const scene: SceneExport<WorkflowSceneLogicProps> = {
@@ -64,6 +66,8 @@ export const scene: SceneExport<WorkflowSceneLogicProps> = {
     }),
     productKey: ProductKey.WORKFLOWS,
 }
+
+const WORKFLOW_SECRET_REENTRY_CONFIRM_LABELS = { save: 'Save', test: 'Run test', publish: 'Publish' }
 
 export function WorkflowScene(props: WorkflowSceneLogicProps): JSX.Element {
     const workflowSceneProps: WorkflowSceneLogicProps = {
@@ -107,6 +111,7 @@ export function WorkflowScene(props: WorkflowSceneLogicProps): JSX.Element {
     // Attach child logics to the scene logic so they persist across tab switches
     useAttachedLogic(batchJobsLogic, sceneLogic)
     useAttachedLogic(logic, sceneLogic)
+    useAttachedLogic(workflowSecretReentryLogic(workflowProps), sceneLogic)
 
     // Debounced so per-keystroke edits don't re-serialize the whole graph into the agent context.
     // The id is debounced with the workflow as one value so a navigation between workflows can never
@@ -254,6 +259,11 @@ export function WorkflowScene(props: WorkflowSceneLogicProps): JSX.Element {
                 {showsBuilder && <WorkflowEditorVisitTracker {...workflowProps} />}
                 <WorkflowSceneHeader {...props} />
                 <WorkflowEmailPauseBanner />
+                <SecretReentryModal
+                    dialogKey={workflowSecretReentryDialogKey(workflowProps)}
+                    confirmLabels={WORKFLOW_SECRET_REENTRY_CONFIRM_LABELS}
+                    confirmDataAttr="workflow-secret-reentry-confirm"
+                />
                 {isSavedWorkflow && <WorkflowImportNotesBanner id={props.id!} />}
                 {isSavedWorkflow && <WorkflowBroadcastMoveBanner id={props.id!} />}
                 {!isSavedWorkflow && <WorkflowAiEmailDraftStatus {...workflowProps} />}

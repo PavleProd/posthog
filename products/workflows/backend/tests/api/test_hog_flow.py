@@ -8916,7 +8916,8 @@ class TestHogFlowSecretInputs(APIBaseTest):
 
         assert res.status_code == expected_status, res.json()
         if expected_status == 400:
-            assert (res.json()["attr"], res.json()["code"]) == (_CONNECTION_ATTR, "integration_origin_refused")
+            attr = f"configuration__{_CONNECTION_ATTR}" if write == "test_run" else _CONNECTION_ATTR
+            assert (res.json()["attr"], res.json()["code"]) == (attr, "integration_origin_refused")
             if kind == "slack":
                 assert res.json()["detail"] == _SLACK_ONLY_MESSAGE
 
