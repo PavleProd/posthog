@@ -344,7 +344,8 @@ class SourcesConsulted(Scorer):
         if parser is None:
             return Score(name=self._name(), score=0.0, metadata={"reason": "No raw log"})
         queries = [_query(call) for call in _successful_data_queries(parser)]
-        read, missing = [], []
+        read: list[object] = []
+        missing: list[object] = []
         for entry in tables:
             aliases = _table_aliases(entry)
             (read if any(reads_table(query, aliases) for query in queries) else missing).append(entry)
@@ -356,8 +357,9 @@ class SourcesAvoided(Scorer):
 
     Entries take the same names or alias lists as ``SourcesConsulted``.
 
-    ``"scope": "answer"`` checks only the last successful data query, so a case can let the agent inspect a
-    table (to find it empty, say) as long as the answer does not come from it. The default scope checks every
+    ``"scope": "answer"`` fails only when every successful data query reads a listed table, so the agent can
+    inspect one (to find it empty, say) before or after the query that answers. Pair it with a value check or a
+    judge, because this scope cannot tell which query the answer came from. The default scope checks every
     successful data query.
     """
 
@@ -378,12 +380,15 @@ class SourcesAvoided(Scorer):
         if parser is None:
             return Score(name=self._name(), score=0.0, metadata={"reason": "No raw log"})
         queries = [_query(call) for call in _successful_data_queries(parser)]
+        names = [alias for entry in tables for alias in _table_aliases(entry)]
+        offending = [query for query in queries if reads_table(query, names)]
         if spec.get("scope") == "answer":
             if not queries:
                 return Score(name=self._name(), score=None, metadata={"reason": "No successful data query"})
-            queries = queries[-1:]
-        names = [alias for entry in tables for alias in _table_aliases(entry)]
-        offending = [query for query in queries if reads_table(query, names)]
+            answered_elsewhere = len(offending) < len(queries)
+            return Score(
+                name=self._name(), score=1.0 if answered_elsewhere else 0.0, metadata={"offending_queries": offending}
+            )
         return Score(name=self._name(), score=0.0 if offending else 1.0, metadata={"offending_queries": offending})
 
 

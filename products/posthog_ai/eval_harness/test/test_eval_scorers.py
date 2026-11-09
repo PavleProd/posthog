@@ -376,7 +376,8 @@ _V3_INSPECTION = ("execute-sql", {"query": "SELECT count() FROM crm_deals_v3"}, 
     [
         ([_V3_INSPECTION, _SQL_ANSWER], "answer", 1.0),
         ([_V3_INSPECTION, _SQL_ANSWER], None, 0.0),
-        ([_SQL_ANSWER, _V3_INSPECTION], "answer", 0.0),
+        ([_SQL_ANSWER, _V3_INSPECTION], "answer", 1.0),
+        ([_V3_INSPECTION], "answer", 0.0),
         ([_SQL_ANSWER], None, 1.0),
     ],
 )
