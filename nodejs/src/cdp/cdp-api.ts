@@ -72,7 +72,7 @@ import { GroupsManagerService } from './services/managers/groups-manager.service
 import { HogFunctionManagerService } from './services/managers/hog-function-manager.service'
 import { TeamWorkflowsConfigService } from './services/managers/team-workflows-config.service'
 import { EMAIL_QUEUE_PRIORITY, EmailQueuePriorityClass, cdpEmailQueuedTotal } from './services/messaging/email-priority'
-import { EmailStatusService } from './services/messaging/email-status.service'
+import { EmailSkipReason, EmailStatusService } from './services/messaging/email-status.service'
 import { EmailSuppressionService } from './services/messaging/email-suppression.service'
 import { EmailTrackingService } from './services/messaging/email-tracking.service'
 import { EmailValidationService } from './services/messaging/email-validation.service'
@@ -204,6 +204,16 @@ const senderTheCallerChose = (from: AcceptedSend['from']): CallerChosenSender | 
     }
     return from.email ? { email: from.email, name: from.name } : { integrationId: from.integrationId, name: from.name }
 }
+
+// The refusals that the email worker records as a skipped send when it finds the same problem. A quota limit and an
+// inactive workflow are not skipped sends, because the caller can send again after it waits or fixes the workflow.
+const isSkippedSendRefusal = (
+    outcome: TransactionalEmailOutcome
+): outcome is TransactionalEmailOutcome & EmailSkipReason =>
+    outcome === 'sending_suspended' ||
+    outcome === 'sending_paused' ||
+    outcome === 'recipient_suppressed' ||
+    outcome === 'recipient_unreachable'
 
 export class CdpApi {
     private hogExecutorAsync: HogExecutorAsyncService
@@ -1364,6 +1374,11 @@ export class CdpApi {
                 invocation.queue = 'email'
                 invocation.queuePriority = EMAIL_QUEUE_PRIORITY[priorityClass]
 
+                const warnTelemetryFlushFailed = (error: unknown) =>
+                    logger.warn('⚠️', 'Transactional email telemetry flush failed', {
+                        error: error instanceof Error ? error.message : String(error),
+                        invocation_id: invocation.id,
+                    })
                 const idempotencyKeys = this.transactionalEmailIdempotencyKeys
                 const fingerprint = transactionalEmailFingerprint(hogFlow.id, parsed.data, send)
                 if (idempotencyKey) {
@@ -1403,6 +1418,16 @@ export class CdpApi {
                             stages.start('idempotency')
                             await idempotencyKeys.release(team.id, idempotencyKey, invocation.id)
                         }
+                        if (isSkippedSendRefusal(refusal.outcome)) {
+                            this.emailStatusService.queueRefusedSend({
+                                teamId: team.id,
+                                messageId: invocation.id,
+                                recipient: to,
+                                functionId: hogFlow.id,
+                                reason: refusal.outcome,
+                            })
+                            void this.emailStatusService.flush().catch(warnTelemetryFlushFailed)
+                        }
                         return reply(refusal.outcome, refusal.status, { error: refusal.outcome })
                     }
                     stages.start('queue_insert')
@@ -1435,11 +1460,6 @@ export class CdpApi {
                     functionId: hogFlow.id,
                 })
                 // Best-effort rows, so the 202 waits for the hand-off to Kafka (flushed on shutdown) but not the acks.
-                const warnTelemetryFlushFailed = (error: unknown) =>
-                    logger.warn('⚠️', 'Transactional email telemetry flush failed', {
-                        error: error instanceof Error ? error.message : String(error),
-                        invocation_id: invocation.id,
-                    })
                 void this.emailStatusService.flush().catch(warnTelemetryFlushFailed)
                 const { produced } =
                     await this.invocationResultsService.invocationResultsRowsService.handOffQueuedRows()
