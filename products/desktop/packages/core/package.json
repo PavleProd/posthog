@@ -17,7 +17,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "0.22.1",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
-    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@pierre/diffs": "^1.2.11",
     "@posthog/agent": "link:../../../../packages/agent/packages/agent",
     "@posthog/api-client": "workspace:*",
