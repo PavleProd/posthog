@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from posthog.test.base import BaseTest
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -18,7 +19,9 @@ from products.cdp.backend.models.hog_functions.hog_function import HogFunction
 from products.cdp.backend.services.secret_origins_backfill import (
     SecretOutcome,
     backfill_secret_origins,
-    commit_secret_origins,
+    commit_backfill_row,
+    hog_function_backfill_source,
+    plan_secret_origins,
 )
 
 LIVE_HOG = "fetch('https://api.example.com/track', {'headers': {'Authorization': inputs.api_key}})"
@@ -96,12 +99,17 @@ class TestSecretOriginsBackfill(BaseTest):
     ) -> None:
         hog_function = self._function(hog, secrets, inputs)
 
-        report = self._commit()
+        with patch(
+            "products.cdp.backend.services.secret_origins_backfill.plan_secret_origins", wraps=plan_secret_origins
+        ) as planned:
+            report = self._commit()
 
         hog_function.refresh_from_db()
         assert hog_function.encrypted_inputs == expected
         assert report.outcomes == Counter(expected_outcomes)
         assert (report.rows_written, report.rows_failed) == (1, 0)
+        # The analysis is the expensive part, so a commit runs it once per row, under the row's lock.
+        assert planned.call_count == 1
 
     @parameterized.expand(
         [
@@ -264,7 +272,7 @@ class TestSecretOriginsBackfill(BaseTest):
         rows = HogFunction.objects.filter(pk=hog_function.pk)
         change(rows)
 
-        plan = commit_secret_origins(hog_function.pk, self.team.pk)
+        plan = commit_backfill_row(hog_function_backfill_source(self.team.pk), hog_function.pk)
 
         assert (plan is None) == (expected_origins is None)
         assert rows.get().encrypted_inputs["api_key"].get("allowed_origins") == expected_origins

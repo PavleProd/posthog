@@ -3,7 +3,6 @@ from collections import defaultdict
 from collections.abc import Sequence
 from copy import deepcopy
 from datetime import timedelta
-from enum import StrEnum
 from typing import Any, Optional, cast
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -19,9 +18,8 @@ from django_filters import BaseInFilter, CharFilter, FilterSet
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_field
 from opentelemetry import trace
-from prometheus_client import Counter
 from rest_framework import exceptions, serializers, status, viewsets
-from rest_framework.exceptions import ErrorDetail, PermissionDenied
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.serializers import BaseSerializer
@@ -43,7 +41,6 @@ from posthog.helpers.trigram_search import (
     apply_trigram_search,
     drop_similar_when_exact_exists,
 )
-from posthog.integrations import IntegrationKind, IntegrationManager
 from posthog.models import Team, User
 from posthog.models.activity_logging.activity_log import Change, Detail, log_activity
 from posthog.plugins.plugin_server_api import create_hog_invocation_test, rerun_hog_invocations
@@ -53,13 +50,6 @@ from products.batch_exports.backend.facade import api as batch_exports_api
 from products.batch_exports.backend.facade.contracts import InvalidBatchExportFilters
 from products.cdp.backend.api.hog_function_template import HogFunctionTemplateSerializer
 from products.cdp.backend.filters import DATA_WAREHOUSE_SOURCES
-from products.cdp.backend.integration_origins import (
-    integration_inputs,
-    integration_origins,
-    integration_refusal_message,
-    integration_worker_calls,
-    public_config,
-)
 from products.cdp.backend.internal_events import (
     generic_api_editable_alert_scope,
     is_managed_alert_internal_event,
@@ -80,6 +70,21 @@ from products.cdp.backend.models.plugin import TranspilerError
 from products.cdp.backend.presentation.hog_invocations.rerun import (
     HogInvocationRerunRequestSerializer,
     HogInvocationRerunResponseSerializer,
+)
+from products.cdp.backend.secret_binding import (
+    REFUSAL_CODES,
+    OriginCheck,
+    OriginOutcome,
+    SecretBinding,
+    SecretConfig,
+    comparable_config,
+    count_origin_outcomes,
+    entered_secret_input_keys,
+    integration_origin_outcomes,
+    refusal_errors,
+    secret_binding,
+    secret_binding_enforced,
+    unchanged_secrets,
 )
 from products.cdp.backend.secret_origins import (
     SecretDestinations,
@@ -160,14 +165,6 @@ ENABLE_WITH_OPEN_DRAFT_MESSAGE = (
 CREATE_ENABLED_MESSAGE = (
     "Create destinations disabled: test with an invocation first, then enable with a separate update "
     "once the config looks right."
-)
-
-SECRET_HOST_BINDING_FLAG = "cdp-secret-host-binding"
-SECRET_HOST_BINDING_COUNTER = Counter(
-    "posthog_cdp_secret_host_binding_total",
-    "Secret and integration inputs checked against the origins they may be sent to, by outcome, by the API "
-    "surface that saved them, and by integration kind.",
-    labelnames=["outcome", "surface", "kind"],
 )
 
 # The confirm token makes the publish preview structurally unskippable: only the preview mints it,
@@ -332,21 +329,6 @@ def _only_masked(value: Any) -> bool:
     return value == MASKED_SECRET_VALUE
 
 
-def entered_secret_input_keys(raw_inputs: Any) -> set[str]:
-    """Input keys whose request value replaces the stored secret. A dictionary secret sent with some
-    entries still masked keeps those stored entries, so it does not count as entered."""
-    if not isinstance(raw_inputs, dict):
-        return set()
-    return {
-        key
-        for key, item in raw_inputs.items()
-        if isinstance(item, dict)
-        and "value" in item
-        and item["value"] != MASKED_SECRET_VALUE
-        and not (isinstance(item["value"], dict) and MASKED_SECRET_VALUE in item["value"].values())
-    }
-
-
 def _secret_reentry_details(
     attrs: dict,
     instance: Optional[HogFunction],
@@ -382,7 +364,7 @@ def _raise_origin_refusal(errors: Any) -> None:
     if not isinstance(inputs_errors, dict):
         return
     refused = {
-        key: error for key, error in inputs_errors.items() if getattr(error, "code", None) in _REFUSAL_CODES.values()
+        key: error for key, error in inputs_errors.items() if getattr(error, "code", None) in REFUSAL_CODES.values()
     }
     if refused:
         raise serializers.ValidationError({"inputs": refused})
@@ -424,36 +406,6 @@ def _is_blank_secret(value: str | dict[str, str]) -> bool:
     return not value.strip()
 
 
-def _comparable_inputs(items: Any) -> dict:
-    return {
-        key: (item.get("value"), item.get("templating") or "hog")
-        for key, item in (items or {}).items()
-        if isinstance(item, dict)
-    }
-
-
-# A schema change can turn an input into a secret or an integration, so it changes what the code receives.
-def _comparable_schema(schemas: Any) -> list[str]:
-    return sorted(
-        repr((schema.get("key"), schema.get("type"), bool(schema.get("secret")), schema.get("integration")))
-        for schema in schemas or []
-        if isinstance(schema, dict)
-    )
-
-
-def _analyzed_config(
-    hog: Optional[str], inputs_schema: Any, inputs: dict, mappings: Any, secret_keys: set[str]
-) -> tuple:
-    public_inputs = {key: item for key, item in inputs.items() if key not in secret_keys}
-    mapping_dicts = [mapping for mapping in mappings or [] if isinstance(mapping, dict)]
-    return (
-        hog or "",
-        _comparable_inputs(public_inputs),
-        _comparable_schema(inputs_schema),
-        [(_comparable_inputs(m.get("inputs")), _comparable_schema(m.get("inputs_schema"))) for m in mapping_dicts],
-    )
-
-
 def _unchanged_secrets(
     instance: Optional[HogFunction],
     hog: str,
@@ -463,78 +415,19 @@ def _unchanged_secrets(
     stored_inputs: dict,
     derived: dict,
 ) -> set[str]:
-    """A secret's own value is compared because a dictionary secret can hold the address it is sent to."""
-    secret_keys = set(derived)
-    if instance is None or _analyzed_config(hog, inputs_schema, inputs, mappings, secret_keys) != _analyzed_config(
-        instance.hog, instance.inputs_schema, stored_inputs, instance.mappings, secret_keys
-    ):
+    if instance is None:
         return set()
-    moved = {
-        key
-        for key in secret_keys
-        if _comparable_inputs({key: inputs.get(key)}) != _comparable_inputs({key: stored_inputs.get(key)})
-    }
-    kept = secret_keys - moved
-    if not moved or not kept:
-        return kept
-    with_stored = {key: item for key, item in inputs.items() if key not in moved}
-    with_stored.update({key: stored_inputs[key] for key in moved if key in stored_inputs})
-    restored = secret_origins(hog, with_stored, mapping_inputs(mappings), kept)
-    return {key for key in kept if restored[key] == derived[key]}
-
-
-class SecretBinding(StrEnum):
-    BOUND = "bound"
-    KEPT = "kept"
-    REFUSED = "refused"
-    # An integration whose code sends its credentials only to the origins of its kind.
-    WITHIN = "within"
-
-
-class SecretBindingMetric(StrEnum):
-    BOUND = "bound"
-    KEPT = "kept"
-    REFUSED = "refused"
-    WITHIN = "within"
-    WOULD_REFUSE = "would_refuse"
-    STAGED = "staged"
-
-
-def _binding_metric(outcome: SecretBinding, let_through: bool, stages_draft: bool) -> SecretBindingMetric:
-    if not let_through:
-        return SecretBindingMetric(outcome.value)
-    return SecretBindingMetric.STAGED if stages_draft else SecretBindingMetric.WOULD_REFUSE
-
-
-class OriginCheck(StrEnum):
-    SECRET = "secret"
-    INTEGRATION = "integration"
-    INTEGRATION_UNLISTED = "integration_unlisted"
-
-
-# A key refused by several checks shows the error of the first check here. Entering the secret again
-# does not fix an integration refusal, so those go first and the user does not retype for nothing.
-_REFUSAL_CODES: dict[OriginCheck, str] = {
-    OriginCheck.INTEGRATION: "integration_origin_refused",
-    OriginCheck.INTEGRATION_UNLISTED: "integration_origin_refused",
-    OriginCheck.SECRET: "secret_reentry_required",
-}
-
-
-@frozen
-class _OriginOutcome:
-    key: str
-    check: OriginCheck
-    binding: SecretBinding
-    # The integration kind, or "" for a secret. It labels the metric, so only a known kind is kept.
-    kind: str = ""
-    # What a refusal tells the user, set only when the binding is refused.
-    message: str = ""
-
-    def metric_outcome(self, enforced: bool, stages_draft: bool) -> str:
-        let_through = self.binding == SecretBinding.REFUSED and not enforced
-        metric = _binding_metric(self.binding, let_through, stages_draft)
-        return metric if self.check == OriginCheck.SECRET else f"{self.check}_{metric}"
+    return unchanged_secrets(
+        SecretConfig(code=hog, inputs=inputs, mappings=mappings, inputs_schema=inputs_schema),
+        SecretConfig(
+            code=instance.hog or "",
+            inputs=stored_inputs,
+            mappings=instance.mappings,
+            inputs_schema=instance.inputs_schema,
+        ),
+        set(derived),
+        derived,
+    )
 
 
 @frozen
@@ -544,17 +437,6 @@ class _BoundSecret:
     derived: SecretOrigins
     binding: SecretBinding
     message: str = ""
-
-
-def secret_binding(
-    derived: SecretOrigins, baseline: Optional[SecretOrigins], entered: bool, unchanged: bool
-) -> tuple[SecretOrigins, SecretBinding]:
-    """The origins a secret may be sent to after a save, and whether the save binds, keeps or is
-    refused. A secret with no baseline is new, so it binds like an entered one."""
-    if entered or baseline is None:
-        return derived, SecretBinding.BOUND
-    sends_within = isinstance(derived, frozenset) and isinstance(baseline, frozenset) and derived <= baseline
-    return baseline, SecretBinding.KEPT if unchanged or sends_within else SecretBinding.REFUSED
 
 
 def _secret_baselines(
@@ -1188,18 +1070,18 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
             if not attrs.get("hog"):
                 raise serializers.ValidationError({"hog": "Required."})
 
-        outcomes: list[_OriginOutcome] = []
+        outcomes: list[OriginOutcome] = []
         bound_secrets: dict[str, _BoundSecret] = {}
         if hog_type not in TYPES_WITH_JAVASCRIPT_SOURCE:
             bound_secrets = self._bind_secret_origins(attrs, team, instance, hog_type)
             outcomes += [
-                _OriginOutcome(key=key, check=OriginCheck.SECRET, binding=bound.binding, message=bound.message)
+                OriginOutcome(key=key, check=OriginCheck.SECRET, binding=bound.binding, message=bound.message)
                 for key, bound in bound_secrets.items()
             ]
             outcomes += self._integration_origin_outcomes(attrs, team, instance)
         stages_draft = bool(self.context.get("stages_draft"))
         refuses = any(item.binding == SecretBinding.REFUSED for item in outcomes)
-        enforce = refuses and not stages_draft and self._enforces_secret_binding(team)
+        enforce = refuses and not stages_draft and secret_binding_enforced(self.context)
         for key, bound in bound_secrets.items():
             origins = bound.origins
             if bound.binding == SecretBinding.REFUSED and not enforce and not stages_draft:
@@ -1215,15 +1097,16 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
         stored_secrets = self.context.get("encrypted_inputs") or {}
         return {**(instance.inputs or {}), **self.context.get("live_encrypted_inputs", stored_secrets)}
 
-    def _config_unchanged(
-        self, hog: str, inputs_schema: Any, inputs: dict, mappings: Any, instance: Optional[HogFunction]
-    ) -> bool:
+    def _config_unchanged(self, config: SecretConfig, instance: Optional[HogFunction]) -> bool:
         if instance is None:
             return False
-        stored = _analyzed_config(
-            instance.hog, instance.inputs_schema, self._stored_inputs(instance), instance.mappings, set()
+        stored = SecretConfig(
+            code=instance.hog or "",
+            inputs=self._stored_inputs(instance),
+            mappings=instance.mappings,
+            inputs_schema=instance.inputs_schema,
         )
-        return _analyzed_config(hog, inputs_schema, inputs, mappings, set()) == stored
+        return comparable_config(config, set()) == comparable_config(stored, set())
 
     def _bind_secret_origins(
         self, attrs: dict, team: Team, instance: Optional[HogFunction], function_type: str
@@ -1276,81 +1159,21 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
 
     def _integration_origin_outcomes(
         self, attrs: dict, team: Team, instance: Optional[HogFunction]
-    ) -> list[_OriginOutcome]:
-        inputs = attrs.get("inputs") or {}
-        mappings = attrs.get("mappings", instance.mappings if instance else None)
-        ids_by_key: dict[str, set[int]] = {}
-        multi_keys: set[str] = set()
-        for item in integration_inputs(attrs.get("inputs_schema"), inputs, mappings):
-            ids_by_key.setdefault(item.key, set()).update(item.integration_ids)
-            if item.holds_list:
-                multi_keys.add(item.key)
-        rows = IntegrationManager.any.get_many(team.id, set().union(*ids_by_key.values())) if ids_by_key else {}
-        connections = {key: [rows[i] for i in ids if i in rows] for key, ids in ids_by_key.items()}
-        connections = {key: found for key, found in connections.items() if found}
-        if not connections:
-            return []
-
-        hog = attrs.get("hog", instance.hog if instance else "") or ""
-        configs = {
-            key: public_config(found[0].config, found[0].sensitive_config)
-            for key, found in connections.items()
-            if len(found) == 1 and key not in multi_keys
-        }
-        # A key may be handed to a worker function only when every connection it holds allows it.
-        worker_calls = {
-            key: frozenset.intersection(*(integration_worker_calls(row.kind) for row in found))
-            for key, found in connections.items()
-        }
-        derived = secret_origins(hog, inputs, mapping_inputs(mappings), set(connections), configs, worker_calls)
-        unchanged = self._config_unchanged(hog, attrs.get("inputs_schema"), inputs, mappings, instance)
-
-        outcomes = []
-        for key, found in connections.items():
-            origins = derived[key]
-            for row in found:
-                allowed = integration_origins(row.kind, row.config)
-                # An unlisted kind has no origins to check against, so like an unbound secret it only
-                # keeps a config it already had.
-                check = OriginCheck.INTEGRATION if allowed is not None else OriginCheck.INTEGRATION_UNLISTED
-                if origins == frozenset() or (
-                    allowed is not None and isinstance(origins, frozenset) and origins <= allowed
-                ):
-                    binding = SecretBinding.WITHIN
-                else:
-                    binding = SecretBinding.KEPT if unchanged else SecretBinding.REFUSED
-                kind = row.kind if row.kind in IntegrationKind else "other"
-                message = integration_refusal_message(row.kind, row.config)
-                outcomes.append(_OriginOutcome(key=key, check=check, binding=binding, kind=kind, message=message))
-        return outcomes
-
-    def _enforces_secret_binding(self, team: Team) -> bool:
-        if self.context.get("view") is None:
-            return False
-        return bool(
-            posthoganalytics.feature_enabled(
-                SECRET_HOST_BINDING_FLAG,
-                str(team.uuid),
-                groups={"organization": str(team.organization_id)},
-                send_feature_flag_events=False,
-            )
+    ) -> list[OriginOutcome]:
+        config = SecretConfig(
+            code=attrs.get("hog", instance.hog if instance else "") or "",
+            inputs=attrs.get("inputs") or {},
+            mappings=attrs.get("mappings", instance.mappings if instance else None),
+            inputs_schema=attrs.get("inputs_schema"),
         )
+        return integration_origin_outcomes(team.id, config, lambda: self._config_unchanged(config, instance))
 
-    def _report_origins(self, outcomes: list[_OriginOutcome], enforce: bool) -> None:
+    def _report_origins(self, outcomes: list[OriginOutcome], enforce: bool) -> None:
         stages_draft = bool(self.context.get("stages_draft"))
         surface = "draft" if stages_draft else getattr(self.context.get("view"), "action", None) or "internal"
-        for item in outcomes:
-            SECRET_HOST_BINDING_COUNTER.labels(
-                outcome=item.metric_outcome(enforce, stages_draft), surface=surface, kind=item.kind
-            ).inc()
-        if not enforce:
-            return
-        errors: dict[str, ErrorDetail] = {}
-        for check, code in _REFUSAL_CODES.items():
-            for item in outcomes:
-                if item.check == check and item.binding == SecretBinding.REFUSED:
-                    errors.setdefault(item.key, ErrorDetail(item.message, code=code))
-        raise serializers.ValidationError({"inputs": errors})
+        count_origin_outcomes(outcomes, surface, enforce, stages_draft)
+        if enforce:
+            raise serializers.ValidationError({"inputs": refusal_errors(outcomes)})
 
     def to_representation(self, data):
         is_instance = isinstance(data, HogFunction)

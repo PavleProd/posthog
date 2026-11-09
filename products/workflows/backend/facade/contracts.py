@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from posthog.models.team.team import Team
     from posthog.models.user import User
 
+    from products.cdp.backend.secret_binding import OriginOutcome
+
 
 @frozen
 class WorkflowViewAccess:
@@ -1212,3 +1214,10 @@ class PushTokenImportRecord:
     error: str
     created_at: datetime
     finished_at: datetime | None
+
+
+@frozen
+class FlowSecretBinding:
+    # Every secret and connection checked, by step id.
+    outcomes: "dict[str, list[OriginOutcome]]"
+    rewrites_secrets: bool
