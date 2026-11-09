@@ -142,7 +142,8 @@ class ObjectIds:
     is allowed, which is the usual answer when the project grants access by default. So an empty `ids`
     means nothing when `excluded` is False and everything when it is True.
     `creator_exempt` means resources the subject created are allowed whatever `ids` say. The caller
-    supplies the creator column, because only the enforcement point knows it.
+    supplies the creator column, because only the enforcement point knows it. `creator_user_id` is the
+    subject's user id, so a caller that did not name the subject can still apply the exemption.
     `complete=False` means the list was capped. `ids` is then empty and `excluded` False, so the caller
     fails closed.
     """
@@ -151,6 +152,7 @@ class ObjectIds:
     complete: bool
     excluded: bool = False
     creator_exempt: bool = False
+    creator_user_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.complete and (self.ids or self.excluded):
