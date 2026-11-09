@@ -113,17 +113,49 @@ impl<K: Hash + Eq + Clone, M> Accumulator<K, M> {
             false
         });
         if before != self.message_count {
-            self.group_index_by_key.clear();
-            for (index, group) in self.groups.iter().enumerate() {
-                if let Some(key) = &group.key {
-                    self.group_index_by_key
-                        .entry(group.partition)
-                        .or_default()
-                        .insert(key.clone(), index);
-                }
-            }
+            self.rebuild_group_index();
         }
         before - self.message_count
+    }
+
+    /// Removes the copy pushed last, so a message delivered twice keeps the
+    /// place of its first delivery.
+    pub fn remove_last(&mut self, partition: Partition, offset: Offset) -> bool {
+        let found = self
+            .groups
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, group)| group.partition == partition)
+            .find_map(|(group_index, group)| {
+                group
+                    .messages
+                    .iter()
+                    .rposition(|message| message.offset == offset)
+                    .map(|message_index| (group_index, message_index))
+            });
+        let Some((group_index, message_index)) = found else {
+            return false;
+        };
+        self.groups[group_index].messages.remove(message_index);
+        self.message_count -= 1;
+        if self.groups[group_index].is_empty() {
+            self.groups.remove(group_index);
+            self.rebuild_group_index();
+        }
+        true
+    }
+
+    fn rebuild_group_index(&mut self) {
+        self.group_index_by_key.clear();
+        for (index, group) in self.groups.iter().enumerate() {
+            if let Some(key) = &group.key {
+                self.group_index_by_key
+                    .entry(group.partition)
+                    .or_default()
+                    .insert(key.clone(), index);
+            }
+        }
     }
 
     pub fn into_groups(self) -> Vec<Group<K, M>> {
@@ -205,6 +237,41 @@ mod tests {
                 (Partition(1), Some("a"), vec![Offset(5), Offset(7)]),
                 (Partition(1), Some("b"), vec![Offset(6)]),
                 (Partition(0), Some("a"), vec![Offset(2)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn removing_a_redelivered_offset_keeps_the_copy_pushed_first() {
+        let mut acc = Accumulator::default();
+        push(&mut acc, 0, 0, Some("a"));
+        push(&mut acc, 0, 1, None);
+        push(&mut acc, 0, 1, None);
+        push(&mut acc, 0, 2, Some("a"));
+        push(&mut acc, 0, 2, Some("a"));
+        push(&mut acc, 1, 2, Some("a"));
+
+        assert!(acc.remove_last(Partition(0), Offset(1)));
+        assert!(acc.remove_last(Partition(0), Offset(2)));
+        assert!(!acc.remove_last(Partition(0), Offset(9)));
+        push(&mut acc, 0, 3, Some("a"));
+
+        assert_eq!(acc.message_count(), 5);
+        let shapes: Vec<(Partition, Option<&str>, Vec<Offset>)> = acc
+            .into_groups()
+            .iter()
+            .map(|g| (g.partition, g.key, offsets(g)))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (
+                    Partition(0),
+                    Some("a"),
+                    vec![Offset(0), Offset(2), Offset(3)]
+                ),
+                (Partition(0), None, vec![Offset(1)]),
+                (Partition(1), Some("a"), vec![Offset(2)]),
             ]
         );
     }
