@@ -1152,7 +1152,6 @@ describe('Tool Filtering - Feature Flags', () => {
             'activity-summary',
             'personal-inbox-ranking',
             'anomalies-search',
-            'workflows-email-domain-agent-setup',
             'feature-flag-rules-v2-mcp',
             'investigate-insight',
             'workflows-customerio-import',
@@ -1200,7 +1199,6 @@ describe('Tool Filtering - Feature Flags', () => {
                 'autoresearch',
                 'marketing-analytics-setup-plan-mcp',
                 'subscription-source-summaries',
-                'workflows-mcp-onboarding',
                 'aeo-citation-tracking',
                 'self-driving-usage-display',
             ])
@@ -1208,7 +1206,7 @@ describe('Tool Filtering - Feature Flags', () => {
         expect(flags).toContain('ai-observability-offline-evaluations')
         expect(allFlags).not.toContain('dashboard-widgets')
         expect(allFlags).not.toContain('self-driving-usage-mcp')
-        expect(flags).toHaveLength(37)
+        expect(flags).toHaveLength(36)
     })
 
     it('keeps human and task context wiki tools on separate scopes', () => {
