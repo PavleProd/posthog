@@ -9404,6 +9404,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3637c05577168127568a64e9dc5a6887da720efef07b3d9472d45f63ab191166"
 
 [[package]]
+name = "personhog-backfill"
+version = "0.1.0"
+dependencies = [
+ "assignment-coordination",
+ "axum 0.7.9",
+ "bytes",
+ "clap",
+ "common-alloc",
+ "common-database",
+ "common-kafka",
+ "common-liveness",
+ "common-metrics",
+ "envconfig",
+ "futures",
+ "metrics",
+ "personhog-common",
+ "personhog-coordination",
+ "personhog-property-store",
+ "personhog-proto",
+ "prost 0.13.5",
+ "rdkafka",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "personhog-changelog-relay"
 version = "0.1.0"
 dependencies = [
@@ -9730,7 +9763,9 @@ dependencies = [
  "assignment-coordination",
  "async-trait",
  "axum 0.7.9",
+ "bytes",
  "chrono",
+ "clap",
  "common-alloc",
  "common-database",
  "common-kafka",
@@ -9743,11 +9778,13 @@ dependencies = [
  "metrics",
  "personhog-common",
  "personhog-coordination",
+ "personhog-property-store",
  "personhog-proto",
  "prost 0.13.5",
  "rdkafka",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

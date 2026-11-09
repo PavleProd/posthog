@@ -125,8 +125,27 @@ When the writer is slow (PG latency, pool saturation), size-triggered flushes st
 | `personhog_writer_e2e_latency_seconds` | histogram | End-to-end latency from Kafka message creation to PG commit |
 | `personhog_writer_buffer_size` | gauge | Current buffer entries |
 | `personhog_writer_partition_offset{partition}` | gauge | Current offset per partition |
+| `personhog_writer_property_partitions_lost_total{reason}` | counter | Partitions whose offsets were left uncommitted because SlateDB could not take their rows here (reason: `ownership_lost`, or `unassigned` when the partition had no assignment on this pod) |
+| `personhog_writer_backfill_live_lag` | gauge | In `backfill` mode, the pod's changelog lag that paces the backfill topic |
+| `personhog_writer_backfill_paused` | gauge | In `backfill` mode, 1 while the backfill topic is paused for live records |
+| `personhog_writer_property_catch_ups_total{outcome, partition}` | counter | `dual` mode replays after an assignment (outcome: `finished`, `nothing_to_replay`, `lost`) |
+| `personhog_writer_property_catch_up_rows_total` | counter | Changelog rows a `dual` mode replay wrote to SlateDB |
+| `personhog_writer_property_fenced_retries_total` | counter | Property-store writes retried after another writer fenced shards this pod still owns |
+| `personhog_writer_property_not_ready_total` | counter | Property-store writes retried while their shards were still opening |
 
 Consumer lag per partition is monitored externally via KMinion (`kminion_kafka_consumer_group_topic_lag`).
+
+## Property backfill
+
+The backfill loads existing person properties into SlateDB while the production writer keeps ingesting. Every write keeps the higher version, so the order in which rows arrive does not matter.
+
+1. `personhog-backfill plan` splits `PG_TARGET_TABLE` into key ranges, and `personhog-backfill scan` workers produce every row onto `PROPERTY_BACKFILL_TOPIC`, on the partition the changelog would carry it on. See [personhog-backfill](../personhog-backfill/README.md).
+2. Writers in `backfill` mode read the changelog and the backfill topic in their own consumer group, with the range assignor, so one pod owns partition N of both topics. A new group starts both topics at their end, so start these writers before taking the snapshot the scanner reads, and scan only after the snapshot. The backfill topic pauses while the changelog lags. These writers refuse to start, and stop, while a changelog migration is draining.
+3. Once the `backfill` mode writers have read the whole backfill topic and caught up on the changelog, delete them.
+4. Switch the production writer to `dual` with `PROPERTY_BACKFILL_GROUP` set to the backfill group. Each newly assigned partition replays the changelog from the backfill group's committed offset up to its own group's, writing SlateDB only, while the writer continues from its own offset. A replay that a crash or a reassignment interrupts runs again in full on the next owner.
+5. Before switching to `slatedb`, which refuses `PROPERTY_BACKFILL_GROUP`, confirm `personhog_writer_property_catch_ups_total` shows `finished` or `nothing_to_replay` for every changelog partition since the switch to `dual`. Without that, a partition whose replay never finished keeps a gap in SlateDB.
+
+**Remove after cutover.** Once production runs `slatedb`, these exist only for the load and can be deleted: the `backfill` storage mode and `src/backfill_mode.rs`, the dual catch-up in `src/catch_up.rs` and `PROPERTY_BACKFILL_GROUP`, `PROPERTY_BACKFILL_TOPIC` and `PROPERTY_BACKFILL_MAX_LIVE_LAG`, the backfill topic in the consumer, and the `personhog-backfill` crate. The per-assignment generations and the cross-topic dedup rule stay; they are correctness fixes the load exposed.
 
 ## Configuration
 
@@ -136,10 +155,14 @@ Consumer lag per partition is monitored externally via KMinion (`kminion_kafka_c
 | `KAFKA_TLS` | `false` | Enable TLS for Kafka |
 | `KAFKA_CLIENT_ID` | (empty) | Pod name for static group membership |
 | `KAFKA_CLIENT_RACK` | (empty) | Rack ID for rack-aware consumption |
+| `PROPERTY_STORAGE_MODE` | `postgres` | Where properties go. `postgres`: Postgres only. `dual`: Postgres and SlateDB (`PROPERTY_STORE_*`). `slatedb`: SlateDB only; Postgres keeps the identity columns, new rows get empty properties, and updates leave the properties columns alone. `backfill`: SlateDB only and nothing to Postgres, in its own consumer group (see [Property backfill](#property-backfill)). Offsets commit once every store in the mode has the batch |
+| `PROPERTY_BACKFILL_TOPIC` | (empty) | The backfill topic. `backfill` mode reads it next to the changelog, and `personhog-backfill scan` writes it. It must have the changelog's partition count |
+| `PROPERTY_BACKFILL_MAX_LIVE_LAG` | `10000` | In `backfill` mode, the backfill topic pauses while the pod's changelog lag exceeds this many records |
+| `PROPERTY_BACKFILL_GROUP` | (empty) | In `dual` mode, the `backfill` mode writers' consumer group. Each newly assigned partition first replays the changelog from that group's committed offset up to this group's. Empty skips the replay |
 | `KAFKA_CONSUMER_GROUP` | `personhog-writer` | Consumer group ID |
 | `ETCD_ENDPOINTS` | `http://localhost:2379` | etcd endpoints; the topic comes from `config/changelog` |
 | `ETCD_PREFIX` | `/personhog/` | etcd key prefix |
-| `DATABASE_URL` | (required) | Postgres connection string |
+| `DATABASE_URL` | (required in `postgres` mode) | Postgres connection string |
 | `PG_MAX_CONNECTIONS` | `20` | Connection pool size |
 | `PG_TARGET_TABLE` | `personhog_person_tmp` | Target table (`posthog_person` for production cutover) |
 | `FLUSH_INTERVAL_MS` | `30000` | Timer-based flush interval (longer = better dedup, higher latency) |

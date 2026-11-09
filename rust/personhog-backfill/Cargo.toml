@@ -1,0 +1,40 @@
+[package]
+name = "personhog-backfill"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+personhog-proto = { path = "../personhog-proto" }
+personhog-common = { path = "../personhog-common" }
+personhog-coordination = { path = "../personhog-coordination" }
+personhog-property-store = { path = "../personhog-property-store" }
+assignment-coordination = { path = "../common/assignment-coordination" }
+common-alloc = { path = "../common/alloc" }
+common-database = { path = "../common/database" }
+common-kafka = { path = "../common/kafka" }
+common-liveness = { path = "../common/liveness" }
+common-metrics = { path = "../common/metrics" }
+
+axum = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+envconfig = { workspace = true }
+futures = { workspace = true }
+metrics = { workspace = true }
+prost = { workspace = true }
+rdkafka = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+uuid = { workspace = true }
+
+[lints]
+workspace = true
