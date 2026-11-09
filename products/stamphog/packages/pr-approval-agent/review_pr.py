@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from attestations import ReviewedHead, lifted_files, pending_attestations, pending_check_names
+from attestations import ReviewedHead, lifted_files, lifting_attestations, pending_attestations, pending_check_names
 from familiarity import AuthorFamiliarity, compute_familiarity, familiarity_evidence
 from gates import (
     DENY_EXEMPT_AUTHOR_TEAMS,
@@ -125,6 +125,10 @@ def _head_commit_sha() -> str:
 
 def _ok(msg: str) -> str:
     return f"  \033[32m✓\033[0m {msg}"
+
+
+def _check_identities(attestations: list[Attestation]) -> list[dict[str, object]]:
+    return [{"check": attestation.check, "app_id": attestation.app_id} for attestation in attestations]
 
 
 def _warn(msg: str) -> str:
@@ -454,6 +458,14 @@ class Pipeline:
         cc = parse_conventional_commit(pr.title)
         reviewed = ReviewedHead(pr_number=pr.number, head_sha=pr.head_sha, merge_base_sha=pr.merge_base_sha)
         lifted = lifted_files(POLICY.attestations, pr.check_runs, file_paths, reviewed)
+        # The server wakes a WAIT when a pending check reports, and retracts an approval when a
+        # lifting check fails later, so both lists name their checks the way GitHub's events do.
+        attestation_checks = {
+            "lifting": _check_identities(
+                lifting_attestations(POLICY.attestations, pr.check_runs, file_paths, reviewed)
+            ),
+            "pending": _check_identities(pending_attestations(POLICY.attestations, pr.check_runs, file_paths)),
+        }
         deny = detect_deny_categories(pr.deny_paths, lifted)
         exception_lifted = bool(POLICY.deny_exceptions) and (
             detect_deny_categories(pr.deny_paths, lifted, apply_exceptions=False) != deny
@@ -538,6 +550,7 @@ class Pipeline:
             "deny_categories": deny,
             "title_scrutiny_flags": title_flags,
             "lifted_files": {category: sorted(files) for category, files in sorted(lifted.items())},
+            "attestations": attestation_checks,
             "allow_listed_only": allow_only,
             "is_test_only": is_test,
             "has_dep_changes": has_dependency_changes(file_paths),
@@ -1177,6 +1190,7 @@ class Pipeline:
                 "deny_categories": self.classification.get("deny_categories", []),
                 "title_scrutiny_flags": self.classification.get("title_scrutiny_flags", []),
                 "lifted_files": self.classification.get("lifted_files", {}),
+                "attestations": self.classification.get("attestations", {}),
                 "ownership": self.classification.get("ownership", {}),
                 "familiarity": familiarity_evidence(self.familiarity),
                 # Audit trail: records that this review ran with the gates relaxed (see __init__).

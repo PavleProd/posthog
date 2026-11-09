@@ -15,6 +15,7 @@ from products.stamphog.backend.tasks.tasks import (
     process_pull_request_event,
     request_rereview_after_external_review,
     route_pull_request_reviewers,
+    wake_on_attestation_check,
 )
 from products.stamphog.backend.tasks.trigger_label import create_trigger_label
 
@@ -27,6 +28,7 @@ __all__ = [
     "request_rereview_after_external_review",
     "route_pull_request_reviewers",
     "send_daily_digests",
+    "wake_on_attestation_check",
 ]
 
 

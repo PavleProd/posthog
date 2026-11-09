@@ -45,7 +45,11 @@ from products.stamphog.backend.logic.github_client import STICKY_COMMENT_MARKER,
 from products.stamphog.backend.logic.slack_digest import _THREAD_LEAD
 from products.stamphog.backend.models import DigestRun, PullRequest, PullRequestAudience, ReviewRun, StamphogRepoConfig
 from products.stamphog.backend.tasks.digest import send_daily_digests
-from products.stamphog.backend.tasks.tasks import process_inbox_pr_review, rereview_after_external_review
+from products.stamphog.backend.tasks.tasks import (
+    process_inbox_pr_review,
+    rereview_after_external_review,
+    wake_on_attestation_check,
+)
 from products.stamphog.backend.temporal import activities
 from products.stamphog.backend.temporal.activities import (
     MarkReviewFailedInput,
@@ -622,6 +626,7 @@ def test_a_final_gate_verdict_is_posted_without_a_sandbox_review(
 
     engine_failure = EnginePregateError("the engine pre-check exited with code 1") if engine_breaks else None
     with (
+        patch("products.stamphog.backend.tasks.tasks.wake_on_attestation_check.delay") as wake,
         patch("products.stamphog.backend.temporal.activities.summarize_refusal", return_value=summary),
         patch.object(activities, "run_engine_pregate", side_effect=engine_failure, wraps=activities.run_engine_pregate),
         patch.object(activities, "fetch_folder_policy_files", return_value=None)
@@ -633,6 +638,13 @@ def test_a_final_gate_verdict_is_posted_without_a_sandbox_review(
     pull_request = PullRequest.objects.for_team(team.id).get(repo_config=repo_config, pr_number=101)
     run = ReviewRun.objects.for_team(team.id).filter(pull_request=pull_request).latest("created_at")
     assert run.output["pregate_outcome"] == expect_pregate_outcome
+    # A check that reported while the pre-check ran found no WAIT to wake, so the saved WAIT asks once.
+    if expect_pregate_outcome == "final:WAIT":
+        wake.assert_called_once_with(
+            repository=REPO, pr_number=101, head_sha=head_sha, check="Migration risk", app_id=_MIGRATION_RISK_APP_ID
+        )
+    else:
+        wake.assert_not_called()
     if expect_in_body is None:
         reviewer_commands = [c for c in stamphog_chain.sandbox_class.executed_commands if "review_local.py" in c]
         assert reviewer_commands
@@ -2188,6 +2200,121 @@ def test_finished_external_review_reruns_only_a_waiting_verdict(
     # A repeated nudge restarts the still-QUEUED run, which is a no-op for a live workflow.
     assert start.call_count == (len(nudged_heads) if expected_new_runs else 0)
     assert all(run.output.get("rereview_after_external_review") for run in new_runs)
+
+
+_CHECK = {"check": "Migration risk", "app_id": _MIGRATION_RISK_APP_ID}
+
+
+def _check_run(conclusion: str, *, run_id: int = 1, status: str = "completed") -> dict:
+    return {
+        "id": run_id,
+        "name": "Migration risk",
+        "app": {"id": _MIGRATION_RISK_APP_ID},
+        "status": status,
+        "conclusion": conclusion,
+    }
+
+
+@pytest.mark.django_db(databases=PRODUCT_DATABASES)
+@pytest.mark.parametrize(
+    "status, pending, check_runs, earlier_wakes, expected_new_runs",
+    [
+        pytest.param(ReviewRunStatus.GATED, [_CHECK], [_check_run("success")], 0, 1, id="check-reported"),
+        pytest.param(ReviewRunStatus.GATED, [_CHECK], [_check_run("failure")], 0, 1, id="check-failed-reviews-again"),
+        pytest.param(
+            ReviewRunStatus.GATED, [_CHECK], [_check_run("", status="in_progress")], 0, 0, id="check-still-running"
+        ),
+        pytest.param(ReviewRunStatus.GATED, [_CHECK], [], 0, 0, id="check-unknown-to-github"),
+        pytest.param(
+            ReviewRunStatus.GATED, [{**_CHECK, "check": "Other"}], [_check_run("success")], 0, 0, id="other-check"
+        ),
+        pytest.param(ReviewRunStatus.GATED, [_CHECK], [_check_run("success")], 3, 0, id="per-head-cap"),
+        pytest.param(ReviewRunStatus.COMPLETED, [_CHECK], [_check_run("success")], 0, 0, id="engine-wait"),
+    ],
+)
+def test_a_completed_attestation_check_wakes_only_the_wait_that_named_it(
+    team,
+    stamphog_chain: StamphogChain,
+    status: ReviewRunStatus,
+    pending: list[dict],
+    check_runs: list[dict],
+    earlier_wakes: int,
+    expected_new_runs: int,
+) -> None:
+    # The task trusts the run's own record of what it waited on and GitHub's record of the check,
+    # never the event, so a stray or stale delivery cannot start a review.
+    repo_config = _repo_config(team.id)
+    head_sha = "sha127b"
+    live_pr = _pr_object(127, "devex-dev", head_sha) | {"state": "open", "author_association": "MEMBER"}
+    stamphog_chain.recorder.register_pr(REPO, 127, live_pr, _pr_files())
+    stamphog_chain.recorder.check_runs[(REPO, head_sha)] = check_runs
+    pull_request = PullRequest.objects.for_team(team.id).create(
+        team_id=team.id, repo_config=repo_config, pr_number=127, author_login="devex-dev"
+    )
+    for _ in range(earlier_wakes):
+        ReviewRun.objects.for_team(team.id).create(
+            team_id=team.id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            status=ReviewRunStatus.GATED,
+            verdict=ReviewVerdict.WAIT,
+            output={"attestation_check_wake": True},
+        )
+    waiting = ReviewRun.objects.for_team(team.id).create(
+        team_id=team.id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+        status=status,
+        verdict=ReviewVerdict.WAIT,
+        gate_result={"classification": {"attestations": {"pending": pending, "lifting": []}}},
+    )
+
+    with patch("products.stamphog.backend.tasks.tasks.execute_stamphog_review_workflow") as start:
+        wake_on_attestation_check(REPO, 127, head_sha, "Migration risk", _MIGRATION_RISK_APP_ID)
+
+    new_runs = ReviewRun.objects.for_team(team.id).filter(pull_request=pull_request, created_at__gt=waiting.created_at)
+    assert new_runs.count() == expected_new_runs
+    assert start.call_count == expected_new_runs
+    assert all(run.output.get("attestation_check_wake") for run in new_runs)
+
+
+@pytest.mark.django_db(databases=PRODUCT_DATABASES)
+@pytest.mark.parametrize(
+    "lifting, check_runs, expect_dismissed",
+    [
+        pytest.param([_CHECK], [_check_run("failure")], True, id="lifting-check-failed"),
+        # The newest run decides, so a failure delivered after a newer success retracts nothing.
+        pytest.param(
+            [_CHECK], [_check_run("failure", run_id=1), _check_run("success", run_id=2)], False, id="newer-run-passes"
+        ),
+        pytest.param([], [_check_run("failure")], False, id="approval-did-not-rest-on-it"),
+    ],
+)
+def test_a_failed_lifting_check_dismisses_the_approval_it_made_possible(
+    team, stamphog_chain: StamphogChain, lifting: list[dict], check_runs: list[dict], expect_dismissed: bool
+) -> None:
+    repo_config = _repo_config(team.id)
+    head_sha = "sha128a"
+    stamphog_chain.recorder.check_runs[(REPO, head_sha)] = check_runs
+    pull_request = PullRequest.objects.for_team(team.id).create(
+        team_id=team.id, repo_config=repo_config, pr_number=128, author_login="devex-dev"
+    )
+    approved = ReviewRun.objects.for_team(team.id).create(
+        team_id=team.id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+        status=ReviewRunStatus.COMPLETED,
+        verdict=ReviewVerdict.APPROVED,
+        posted_review_id=77,
+        gate_result={"classification": {"attestations": {"pending": [], "lifting": lifting}}},
+    )
+
+    wake_on_attestation_check(REPO, 128, head_sha, "Migration risk", _MIGRATION_RISK_APP_ID)
+
+    approved.refresh_from_db()
+    dismissals = [w for w in stamphog_chain.recorder.github_writes if w["kind"] == "dismiss_review"]
+    assert (approved.approval_dismissed_at is not None) is expect_dismissed
+    assert [w["review_id"] for w in dismissals] == ([77] if expect_dismissed else [])
 
 
 @pytest.mark.django_db(databases=PRODUCT_DATABASES)

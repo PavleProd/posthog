@@ -18,6 +18,7 @@ WEBHOOK_PATH = "/webhooks/stamphog/github"
 PULL_REQUEST_DELAY = "products.stamphog.backend.facade.tasks.process_pull_request_event.delay"
 INSTALLATION_DELAY = "products.stamphog.backend.facade.tasks.process_installation_event.delay"
 ROUTING_DELAY = "products.stamphog.backend.facade.tasks.route_pull_request_reviewers.delay"
+ATTESTATION_WAKE_DELAY = "products.stamphog.backend.facade.tasks.wake_on_attestation_check.delay"
 
 
 def _signature(body: bytes, secret: str) -> str:
@@ -73,6 +74,37 @@ class TestStamphogGitHubWebhook(SimpleTestCase):
         other_delay.assert_not_called()
         # Routing is its own consumer, queued only for the actions that ask for reviews.
         assert routing_delay.call_count == (1 if routes else 0)
+
+    @parameterized.expand(
+        [
+            ("completed", 2492437, [{"number": 7}, {"number": 9}], [7, 9]),
+            ("created", 2492437, [{"number": 7}], []),
+            ("completed", 15368, [{"number": 7}], []),
+            ("completed", 2492437, [], []),
+        ]
+    )
+    @patch(ATTESTATION_WAKE_DELAY)
+    def test_a_completed_check_run_from_a_publisher_app_wakes_each_of_its_prs(
+        self, action: str, app_id: int, pull_requests: list[dict], expected_numbers: list[int], wake_delay
+    ) -> None:
+        # GitHub Actions reports every CI job this way, so its runs and incomplete runs stop here.
+        check_run = {"name": "Migration risk", "head_sha": "abc", "app": {"id": app_id}, "pull_requests": pull_requests}
+        body = json.dumps(
+            {"action": action, "check_run": check_run, "repository": {"full_name": "acme/widgets"}}
+        ).encode("utf-8")
+
+        response = self._post(body, event="check_run", signature=_signature(body, WEBHOOK_SECRET))
+
+        assert response.status_code == 202
+        assert [call.kwargs["pr_number"] for call in wake_delay.call_args_list] == expected_numbers
+        for call in wake_delay.call_args_list:
+            assert call.kwargs == {
+                "repository": "acme/widgets",
+                "pr_number": call.kwargs["pr_number"],
+                "head_sha": "abc",
+                "check": "Migration risk",
+                "app_id": app_id,
+            }
 
     @patch(ROUTING_DELAY)
     @patch(PULL_REQUEST_DELAY)

@@ -104,7 +104,11 @@ from products.stamphog.backend.logic.reviewer import (
 )
 from products.stamphog.backend.logic.scrubbing import neutralize_active_markdown, scrub_credentials
 from products.stamphog.backend.models import PullRequest, PullRequestAudience, ReviewRun, StamphogRepoConfig
-from products.stamphog.backend.tasks.tasks import queue_routing_after_verdict, request_rereview_after_external_review
+from products.stamphog.backend.tasks.tasks import (
+    queue_routing_after_verdict,
+    request_attestation_check_wake,
+    request_rereview_after_external_review,
+)
 from products.stamphog.backend.temporal.constants import (
     ACTIVITY_RETRY_POLICY,
     CLONE_STEP_TIMEOUT_SECONDS,
@@ -1933,6 +1937,9 @@ def post_verdict(input: StamphogReviewInput) -> dict:
         activity.logger.info(f"Run {run.id} superseded during verdict posting; verdict not saved")
         return {"verdict": "skipped_superseded"}
 
+    if run.status == ReviewRunStatus.GATED:
+        _wake_on_checks_that_reported_during_the_review(run)
+
     # Right after the save wins: the GitHub steps below can still fail the activity, and the
     # outcome must not wait on them. Running it before the save would hand a stale refusal to
     # ReviewHog after a superseding delivery overrode it (a newer run might approve the same head).
@@ -1970,6 +1977,31 @@ def post_verdict(input: StamphogReviewInput) -> dict:
     _capture_review_timings(run, str(parsed.verdict), int((time.monotonic() - post_started) * 1000))
     activity.logger.info(f"Posted verdict {parsed.verdict} for run {run.id}")
     return {"verdict": str(parsed.verdict), "waited_on_external_review": _waited_on_external_review(run)}
+
+
+def _wake_on_checks_that_reported_during_the_review(run: ReviewRun) -> None:
+    """Ask the wake task about each check this WAIT is pending on, right after the WAIT is saved.
+
+    The check's own completion event wakes a saved WAIT, but one that reported while this review ran
+    found nothing to wake. The task reads the check from GitHub, so a check still running is a no-op.
+    This is best effort. A lost request leaves the PR at WAIT until the next push, as before this
+    wake existed.
+    """
+    pull_request = run.pull_request
+    pending = (((run.gate_result or {}).get("classification") or {}).get("attestations") or {}).get("pending") or []
+    for entry in pending:
+        if not isinstance(entry, dict) or not isinstance(entry.get("app_id"), int):
+            continue
+        try:
+            request_attestation_check_wake(
+                repository=pull_request.repo_config.repository,
+                pr_number=pull_request.pr_number,
+                head_sha=run.head_sha,
+                check=str(entry.get("check") or ""),
+                app_id=entry["app_id"],
+            )
+        except Exception:
+            activity.logger.exception(f"Run {run.id}: could not request the attestation check wake")
 
 
 def _notify_finished_review(

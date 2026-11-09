@@ -393,6 +393,7 @@ Unlike CODEOWNERS, the category only stops stamphog: any human approval still co
 
 A deny category can be lifted by a CI check that the policy names under `attestations`.
 Each entry pins a check name to the GitHub App that publishes it, the categories it may lift, the paths it may lift them for, and optionally companion `sibling_files` and the `publisher_files` the check runs from.
+An entry with `publisher_files` lifts nothing for a PR whose diff touches one of them.
 The check embeds the files it vouches for in a `<!-- stamphog:v1 ... -->` marker in its summary; the engine lifts only the listed files that are in the diff and match the entry's paths, by exact path, and only for the entry's categories.
 Those files still count toward every other deny category.
 The shipped default names no attestation; this repository's `.stamphog/policy.yml` names `Migration risk` for the `migrations` category.

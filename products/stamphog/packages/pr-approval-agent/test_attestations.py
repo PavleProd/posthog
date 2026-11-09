@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from attestations import ReviewedHead, lifted_files, pending_attestations, pending_check_names
+from attestations import ReviewedHead, lifted_files, lifting_attestations, pending_attestations, pending_check_names
 from policy import Attestation
 
 _GITHUB_ACTIONS_APP_ID = 15368
@@ -75,7 +75,6 @@ def _proof(**overrides: object) -> dict:
         "Dependency proof",
         app_id=_PROVER_APP_ID,
         summary=_proof_marker(**marker_overrides),
-        publisher_files_current=overrides.pop("publisher_files_current", True),
         **overrides,
     )
 
@@ -161,21 +160,24 @@ def test_object_marker_lifts_every_declared_category_for_the_proven_files() -> N
         "deps_toolchain": {_LOCKFILE},
         "ci_workflows": {_LOCKFILE},
     }
+    assert lifting_attestations([_DEPENDENCY_PROOF], [_proof()], files, _REVIEWED) == [_DEPENDENCY_PROOF]
 
 
 @pytest.mark.parametrize(
-    "proof",
+    "proof, files",
     [
-        pytest.param(_proof(pr=8), id="other-pr"),
-        pytest.param(_proof(head_sha="d" * 40), id="other-head"),
-        pytest.param(_proof(merge_base="d" * 40), id="other-merge-base"),
-        pytest.param(_proof(publisher_files_current=False), id="publisher-changed"),
-        pytest.param(_check("Dependency proof", app_id=_PROVER_APP_ID, summary=_proof_marker()), id="unconfirmed"),
-        pytest.param(_check("Dependency proof", app_id=_PROVER_APP_ID, files=[_LOCKFILE]), id="list-marker"),
+        pytest.param(_proof(pr=8), [_LOCKFILE], id="other-pr"),
+        pytest.param(_proof(head_sha="d" * 40), [_LOCKFILE], id="other-head"),
+        pytest.param(_proof(merge_base="d" * 40), [_LOCKFILE], id="other-merge-base"),
+        pytest.param(_proof(), [_LOCKFILE, *_DEPENDENCY_PROOF.publisher_files], id="publisher-in-diff"),
+        pytest.param(
+            _check("Dependency proof", app_id=_PROVER_APP_ID, files=[_LOCKFILE]), [_LOCKFILE], id="list-marker"
+        ),
     ],
 )
-def test_object_marker_must_prove_this_review_and_a_current_publisher(proof: dict) -> None:
-    assert _lifted([_DEPENDENCY_PROOF], [proof], [_LOCKFILE]) == {}
+def test_object_marker_must_prove_this_review_with_an_untouched_publisher(proof: dict, files: list[str]) -> None:
+    assert _lifted([_DEPENDENCY_PROOF], [proof], files) == {}
+    assert lifting_attestations([_DEPENDENCY_PROOF], [proof], files, _REVIEWED) == []
 
 
 def test_object_marker_never_matches_an_unknown_merge_base() -> None:

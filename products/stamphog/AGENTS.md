@@ -295,6 +295,13 @@ race with CI. It can't reuse `Pipeline._only_pending_attestations`: that method 
 any failing gate other than the deny-list, and a migrations deny always drags the tier gate to
 T2-never with it, so it answers False for every PR it exists to catch.
 
+The engine records the checks it waited on and the checks that lifted a deny in `classification.attestations`, and the server acts on those records, never on the policy, when a `check_run` completes.
+A completion wakes a gated WAIT only when that run named the check as pending, through the same gates as the external re-review, the inbox exclusion included, and at most `_ATTESTATION_WAKES_PER_HEAD` times per head.
+A non-success completion dismisses every standing approval at that head that named the check as lifting.
+Both read the check from GitHub again, because an older run's delivery can arrive after a newer run's.
+`post_verdict` requests the same wake for each pending check right after it saves a gated WAIT, because a check that reported during the review found nothing to wake.
+An entry with `publisher_files` lifts nothing for a PR whose diff touches one of them, so a PR cannot change the publisher that vouches for it.
+
 ## Temporal specifics
 
 - Registering a new activity requires adding it to `temporal/registry.py` — the

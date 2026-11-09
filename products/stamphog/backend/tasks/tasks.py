@@ -1527,9 +1527,9 @@ def _queue_review_at_head(
     workflow restarts on commit. Otherwise older live runs are superseded and a fresh run starts
     once the row commits. Errors propagate so the caller can retry or report them.
 
-    ``revisit_wait`` stops a delivered WAIT at this head from counting as covering it, because
-    the caller wants that verdict revisited. A live run at this head still counts, so repeated
-    requests collapse into one run.
+    ``revisit_wait`` stops a delivered WAIT at this head, engine or gated, from counting as covering
+    it, because the caller wants that verdict revisited. A live run at this head still counts, so
+    repeated requests collapse into one run.
     """
     team_id = repo_config.team_id
     run_write_db = router.db_for_write(ReviewRun)
@@ -1553,7 +1553,9 @@ def _queue_review_at_head(
             .exclude(status__in=(ReviewRunStatus.SUPERSEDED, ReviewRunStatus.FAILED))
         )
         if revisit_wait:
-            covering_runs = covering_runs.exclude(status=ReviewRunStatus.COMPLETED, verdict=ReviewVerdict.WAIT)
+            covering_runs = covering_runs.exclude(
+                status__in=(ReviewRunStatus.COMPLETED, ReviewRunStatus.GATED), verdict=ReviewVerdict.WAIT
+            )
         existing = covering_runs.order_by("-created_at").first()
         # A retarget changes the diff without moving the head, and in label mode no webhook run
         # replaces the old verdict. A run that reviewed another base branch does not cover this one.
@@ -1822,25 +1824,44 @@ def request_manual_review(team_id: int, user_id: int | None, repository: str, pr
     return QueuedReview(run=queued.run, created=queued.created)
 
 
-def _rereview_waiting_run(repo_config: StamphogRepoConfig, pr_number: int, head_sha: str) -> None:
-    """Queue a new review when this PR's latest verdict is a WAIT at ``head_sha`` that is still the PR head."""
-    team_id = repo_config.team_id
-    latest = (
-        ReviewRun.objects.for_team(team_id)
+def _latest_run(repo_config: StamphogRepoConfig, pr_number: int) -> ReviewRun | None:
+    """The PR's newest run, read from the writer because it decides whether a review starts."""
+    return (
+        ReviewRun.objects.for_team(repo_config.team_id)
         .using(router.db_for_write(ReviewRun))
         .filter(pull_request__repo_config=repo_config, pull_request__pr_number=pr_number)
         .order_by("-created_at")
         .first()
     )
+
+
+def _waits_on_external_review(run: ReviewRun) -> bool:
+    # Only an engine WAIT can change when another reviewer finishes. A GATED WAIT waits on a check.
+    return run.status == ReviewRunStatus.COMPLETED and run.verdict == ReviewVerdict.WAIT
+
+
+def _rereview_waiting_run(
+    repo_config: StamphogRepoConfig,
+    pr_number: int,
+    head_sha: str,
+    *,
+    wake: str,
+    waiting: Callable[[ReviewRun], bool],
+) -> None:
+    """Queue a new review when this PR's latest run is a WAIT at ``head_sha`` that is still the PR head.
+
+    ``waiting`` says which WAIT the caller's event can change, and ``wake`` is the output key the new
+    run carries, which names what woke it.
+    """
+    team_id = repo_config.team_id
+    latest = _latest_run(repo_config, pr_number)
     if latest is None or latest.head_sha != head_sha:
         return
     previous_output = latest.output or {}
-    # Only an engine WAIT can change when another reviewer finishes. A GATED WAIT waits on a check.
-    waiting = latest.status == ReviewRunStatus.COMPLETED and latest.verdict == ReviewVerdict.WAIT
     # A run that an earlier call queued and whose workflow start failed stays QUEUED. Queueing again
     # restarts its workflow, so a retry or a later call recovers it.
-    stranded = latest.status == ReviewRunStatus.QUEUED and bool(previous_output.get("rereview_after_external_review"))
-    if not (waiting or stranded):
+    stranded = latest.status == ReviewRunStatus.QUEUED and bool(previous_output.get(wake))
+    if not (waiting(latest) or stranded):
         return
     # Inbox runs carry the self-driving carve-out, which only the inbox trigger paths may grant.
     if previous_output.get("inbox_review"):
@@ -1857,13 +1878,14 @@ def _rereview_waiting_run(repo_config: StamphogRepoConfig, pr_number: int, head_
         return
     if _author_lacks_write_permission(repo_config, repo, pr):
         return
-    output: dict[str, Any] = {"rereview_after_external_review": True}
+    output: dict[str, Any] = {wake: True}
     for key in ("manual_review", "review_trigger"):
         if key in previous_output:
             output[key] = previous_output[key]
     queued = _queue_review_at_head(repo_config, pr, head_sha, output=output, revisit_wait=True)
     logger.info(
-        "stamphog_rereview_after_external_review",
+        "stamphog_rereview_waiting_run",
+        wake=wake,
         repository=repo,
         pr_number=pr_number,
         review_run_id=str(queued.run.id) if queued.run is not None else None,
@@ -1889,7 +1911,13 @@ def rereview_after_external_review(self: Task, repository: str, pr_number: int, 
     )
     try:
         for repo_config in repo_configs:
-            _rereview_waiting_run(repo_config, pr_number, head_sha)
+            _rereview_waiting_run(
+                repo_config,
+                pr_number,
+                head_sha,
+                wake="rereview_after_external_review",
+                waiting=_waits_on_external_review,
+            )
     except GitHubRateLimitError as e:
         logger.warning("stamphog_rereview_rate_limited", repository=repository, pr_number=pr_number)
         raise self.retry(exc=e, countdown=max(e.retry_after or 0, 60))
@@ -1906,6 +1934,159 @@ def request_rereview_after_external_review(*, repository: str, pr_number: int, h
     head is still current. Any other call is a no-op, so a caller may call it for every turn.
     """
     rereview_after_external_review.delay(repository=repository, pr_number=pr_number, head_sha=head_sha)
+
+
+_ATTESTATION_WAKE = "attestation_check_wake"
+# A check that reports again and again on one head starts at most this many reviews there.
+_ATTESTATION_WAKES_PER_HEAD = 3
+
+
+@frozen
+class _CheckIdentity:
+    """The check name and publishing App id that a policy ``attestations`` entry pins."""
+
+    check: str
+    app_id: int
+
+
+def _attestation_checks(run: ReviewRun, kind: str) -> list[dict[str, Any]]:
+    """The checks the engine recorded as ``lifting`` or ``pending`` when it classified this run."""
+    entries = (((run.gate_result or {}).get("classification") or {}).get("attestations") or {}).get(kind)
+    return [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+
+
+def _names_check(entries: list[dict[str, Any]], check: _CheckIdentity) -> bool:
+    return any(entry.get("check") == check.check and entry.get("app_id") == check.app_id for entry in entries)
+
+
+def _completed_check_run(check_runs: list[dict[str, Any]], check: _CheckIdentity) -> dict[str, Any] | None:
+    """The newest completed run of ``check``, which the engine's lift reads, or None while the check runs."""
+    completed = [
+        cr
+        for cr in check_runs
+        if cr.get("name") == check.check
+        and (cr.get("app") or {}).get("id") == check.app_id
+        and cr.get("status") == "completed"
+    ]
+    return max(completed, key=lambda cr: cr.get("id") or 0) if completed else None
+
+
+def _waits_on_check(run: ReviewRun, check: _CheckIdentity) -> bool:
+    """Whether ``run`` is a gated WAIT that ``check`` was pending for, under the per-head wake cap."""
+    if run.status != ReviewRunStatus.GATED or run.verdict != ReviewVerdict.WAIT:
+        return False
+    if not _names_check(_attestation_checks(run, "pending"), check):
+        return False
+    wakes = (
+        ReviewRun.objects.for_team(run.team_id)
+        .using(router.db_for_write(ReviewRun))
+        .filter(pull_request_id=run.pull_request_id, head_sha=run.head_sha, **{f"output__{_ATTESTATION_WAKE}": True})
+        .count()
+    )
+    return wakes < _ATTESTATION_WAKES_PER_HEAD
+
+
+def _approvals_lifted_by_check(
+    repo_config: StamphogRepoConfig, pr_number: int, head_sha: str, check: _CheckIdentity
+) -> list[ReviewRun]:
+    """Standing approvals at ``head_sha`` that a lift from ``check`` made possible."""
+    standing = (
+        ReviewRun.objects.for_team(repo_config.team_id)
+        .using(router.db_for_write(ReviewRun))
+        .filter(
+            pull_request__repo_config=repo_config,
+            pull_request__pr_number=pr_number,
+            head_sha=head_sha,
+            posted_review_id__isnull=False,
+            approval_dismissed_at__isnull=True,
+        )
+    )
+    return [run for run in standing if _names_check(_attestation_checks(run, "lifting"), check)]
+
+
+def _act_on_attestation_check(
+    repo_config: StamphogRepoConfig, pr_number: int, head_sha: str, check: _CheckIdentity
+) -> None:
+    """Retract an approval that ``check`` no longer supports, and wake a WAIT that waited on it.
+
+    The task reads the check from GitHub rather than trusting the event, because an older run's
+    delivery can arrive after a newer run's. The lift reads the newest completed run, so this does too.
+    """
+    approvals = _approvals_lifted_by_check(repo_config, pr_number, head_sha, check)
+    latest = _latest_run(repo_config, pr_number)
+    waiting = latest is not None and latest.head_sha == head_sha and _waits_on_check(latest, check)
+    if not approvals and not waiting:
+        return
+    repo = repo_config.repository
+    client = StamphogGitHubClient(repo_config.installation_id)
+    completed = _completed_check_run(client.get_check_runs(repo, head_sha), check)
+    if completed is None:
+        return
+    if completed.get("conclusion") != "success":
+        for run in approvals:
+            if run.posted_review_id is None:
+                continue  # excluded by the query filter; narrows the Optional for the type checker
+            client.dismiss_pr_review(
+                repo,
+                pr_number,
+                run.posted_review_id,
+                f"The `{check.check}` check this approval relied on no longer passes, so the stamphog approval is dismissed.",
+            )
+            run.approval_dismissed_at = timezone.now()
+            run.save(update_fields=["approval_dismissed_at", "updated_at"])
+            logger.info(
+                "stamphog_approval_dismissed_after_check_failed",
+                repository=repo,
+                pr_number=pr_number,
+                review_run_id=str(run.id),
+                check=check.check,
+                team_id=repo_config.team_id,
+            )
+    if waiting:
+        _rereview_waiting_run(
+            repo_config, pr_number, head_sha, wake=_ATTESTATION_WAKE, waiting=lambda run: _waits_on_check(run, check)
+        )
+
+
+@shared_task(bind=True, ignore_result=True, max_retries=_REREVIEW_MAX_RETRIES)
+def wake_on_attestation_check(
+    self: Task, repository: str, pr_number: int, head_sha: str, check: str, app_id: int
+) -> None:
+    """A check that a policy ``attestations`` entry may name completed for ``head_sha``.
+
+    This has the shape of ``rereview_after_external_review``. The caller knows only the repository,
+    so the task reads the configs across teams, every step checks the state again, and a GitHub or
+    Temporal error retries with backoff. The task does not read the policy. Each run recorded the
+    checks it waited on or was lifted by, so a check that no run names costs one indexed read.
+    """
+    identity = _CheckIdentity(check=check, app_id=app_id)
+    repo_configs = (
+        StamphogRepoConfig.objects.unscoped()
+        .using(router.db_for_write(StamphogRepoConfig))
+        .filter(provider="github", repository__iexact=repository, enabled=True, connected_by_user_id__isnull=False)
+        .exclude(installation_id="")
+    )
+    try:
+        for repo_config in repo_configs:
+            _act_on_attestation_check(repo_config, pr_number, head_sha, identity)
+    except GitHubRateLimitError as e:
+        logger.warning("stamphog_attestation_wake_rate_limited", repository=repository, pr_number=pr_number)
+        raise self.retry(exc=e, countdown=max(e.retry_after or 0, 60))
+    except Exception as e:
+        logger.exception("stamphog_attestation_wake_failed", repository=repository, pr_number=pr_number, error=str(e))
+        raise self.retry(exc=e, countdown=_REREVIEW_RETRY_BASE_SECONDS * 2**self.request.retries)
+
+
+def request_attestation_check_wake(*, repository: str, pr_number: int, head_sha: str, check: str, app_id: int) -> None:
+    """Tell stamphog that ``check`` completed for ``head_sha``, without waiting.
+
+    The worker calls it for each check a saved WAIT is pending on, because a check that reported
+    while the review ran found no WAIT to wake. The task reads the check from GitHub, so a check
+    still running is a no-op.
+    """
+    wake_on_attestation_check.delay(
+        repository=repository, pr_number=pr_number, head_sha=head_sha, check=check, app_id=app_id
+    )
 
 
 _ROUTING_MAX_RETRIES = 4

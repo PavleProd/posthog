@@ -11,10 +11,10 @@ The publisher embeds the files it vouched for in the check summary as a marker:
     <!-- stamphog:v1 {"files": [...], "pr": N, "head_sha": "...", "merge_base": "...", "workflow_sha": "..."} -->
 
 The object form also names the PR, head and merge base it proved, and the default-branch commit the
-publisher ran from. A lift from such a marker needs every one of those to match the review, and, when
-the entry declares `publisher_files`, the server's confirmation that those files are unchanged
-between `workflow_sha` and the default branch now (`publisher_files_current` on the check run). The
-list form carries no identity, so it lifts only when the entry declares no `publisher_files`.
+publisher ran from. A lift from such a marker needs every one of those to match the review. An entry
+that declares `publisher_files` lifts nothing for a PR whose diff touches one of them, so a PR cannot
+change the publisher that vouches for it. The list form carries no identity, so it lifts only when
+the entry declares no `publisher_files`.
 
 Everything short of a complete proof lifts nothing: a run from another App, a non-success
 conclusion, no marker or more than one, a path outside the entry's `paths`, a file not in the diff.
@@ -22,7 +22,7 @@ conclusion, no marker or more than one, a path outside the entry's `paths`, a fi
 
 import re
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -51,8 +51,32 @@ def lifted_files(
     A file is lifted for a category only by exact path, because Git paths are case-sensitive.
     """
     lifted: dict[str, set[str]] = {}
+    for attestation, files in _lifts(attestations, check_runs, pr_file_paths, reviewed):
+        for category in attestation.lifts:
+            lifted.setdefault(category, set()).update(files)
+    return lifted
+
+
+def lifting_attestations(
+    attestations: Iterable[Attestation],
+    check_runs: list[dict],
+    pr_file_paths: list[str],
+    reviewed: ReviewedHead,
+) -> list[Attestation]:
+    """The attestations whose proof lifts at least one file of this PR."""
+    return [attestation for attestation, _ in _lifts(attestations, check_runs, pr_file_paths, reviewed)]
+
+
+def _lifts(
+    attestations: Iterable[Attestation],
+    check_runs: list[dict],
+    pr_file_paths: list[str],
+    reviewed: ReviewedHead,
+) -> Iterator[tuple[Attestation, set[str]]]:
     pr_paths = set(pr_file_paths)
     for attestation in attestations:
+        if pr_paths & set(attestation.publisher_files):
+            continue
         latest = _latest_completed(check_runs, attestation)
         if latest is None or latest.get("conclusion") != "success":
             continue
@@ -61,11 +85,8 @@ def lifted_files(
             continue
         files = {path for path in proven & pr_paths if _matches(attestation, path)}
         files |= _siblings(files, attestation, pr_paths)
-        if not files:
-            continue
-        for category in attestation.lifts:
-            lifted.setdefault(category, set()).update(files)
-    return lifted
+        if files:
+            yield attestation, files
 
 
 def pending_attestations(
@@ -125,8 +146,6 @@ def _proven_files(check_run: dict, attestation: Attestation, reviewed: ReviewedH
         or not reviewed.head_sha
         or not reviewed.merge_base_sha
     ):
-        return None
-    if attestation.publisher_files and check_run.get("publisher_files_current") is not True:
         return None
     return _string_set(payload.get("files"))
 
