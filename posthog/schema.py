@@ -5602,6 +5602,10 @@ class DatabaseSchemaField(BaseModel):
         extra="forbid",
     )
     chain: list[str | int] | None = None
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the column, when the HogQL schema defines one."),
+    )
     fields: list[str] | None = None
     hogql_value: str
     id: str | None = None
@@ -5631,6 +5635,10 @@ class DatabaseSchemaTableCommon(BaseModel):
     certification: DatabaseSchemaTableCertification | None = Field(
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
+    )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
     )
     fields: dict[str, DatabaseSchemaField]
     id: str
@@ -18600,6 +18608,10 @@ class DatabaseSchemaBatchExportTable(BaseModel):
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
     )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
+    )
     fields: dict[str, DatabaseSchemaField]
     id: str
     name: str
@@ -18614,6 +18626,10 @@ class DatabaseSchemaDataWarehouseTable(BaseModel):
     certification: DatabaseSchemaTableCertification | None = Field(
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
+    )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
     )
     fields: dict[str, DatabaseSchemaField]
     format: str | None = Field(
@@ -18646,6 +18662,10 @@ class DatabaseSchemaPostHogTable(BaseModel):
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
     )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
+    )
     fields: dict[str, DatabaseSchemaField]
     id: str
     name: str
@@ -18660,6 +18680,10 @@ class DatabaseSchemaSystemTable(BaseModel):
     certification: DatabaseSchemaTableCertification | None = Field(
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
+    )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
     )
     fields: dict[str, DatabaseSchemaField]
     id: str
@@ -32915,6 +32939,10 @@ class DatabaseSchemaEndpointTable(BaseModel):
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
     )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
+    )
     fields: dict[str, DatabaseSchemaField]
     id: str
     name: str
@@ -32931,6 +32959,10 @@ class DatabaseSchemaManagedViewTable(BaseModel):
     certification: DatabaseSchemaTableCertification | None = Field(
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
+    )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
     )
     fields: dict[str, DatabaseSchemaField]
     id: str
@@ -32950,6 +32982,10 @@ class DatabaseSchemaMaterializedViewTable(BaseModel):
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
     )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
+    )
     fields: dict[str, DatabaseSchemaField]
     id: str
     last_run_at: str | None = None
@@ -32967,6 +33003,10 @@ class DatabaseSchemaViewTable(BaseModel):
     certification: DatabaseSchemaTableCertification | None = Field(
         default=None,
         description=("Present only when the table or view carries a settled data catalog certification."),
+    )
+    description: str | None = Field(
+        default=None,
+        description=("Short description of the table, when the HogQL schema defines one."),
     )
     fields: dict[str, DatabaseSchemaField]
     id: str

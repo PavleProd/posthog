@@ -6934,6 +6934,8 @@ export interface DatabaseSchemaField {
     fields?: string[]
     chain?: (string | integer)[]
     id?: string
+    /** Short description of the column, when the HogQL schema defines one. */
+    description?: string
 }
 
 export type DatabaseSchemaTableType =
@@ -6964,6 +6966,8 @@ export interface DatabaseSchemaTableCommon {
     row_count?: number
     /** Present only when the table or view carries a settled data catalog certification. */
     certification?: DatabaseSchemaTableCertification
+    /** Short description of the table, when the HogQL schema defines one. */
+    description?: string
 }
 
 export interface DatabaseSchemaViewTable extends DatabaseSchemaTableCommon {
