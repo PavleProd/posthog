@@ -51,7 +51,7 @@ STAGING_TABLE_PREFIX = "tmp_geoip_backfill_"
 
 # A successful lookup writes every GeoIP key into `$set`, with null for the missing ones. An event that
 # has neither the property nor the `$set` key therefore never went through a successful lookup.
-_AFFECTED_EVENT_FILTER = """
+AFFECTED_EVENT_FILTER = """
     timestamp >= %(event_time_floor)s AND timestamp < %(event_time_ceiling)s
     AND _timestamp >= %(written_from)s AND _timestamp < %(written_until)s
     AND JSONExtractString(properties, '$ip') != ''
@@ -130,13 +130,18 @@ class StagingPlan:
     config: GeoipBackfillConfig
 
     def query_args(self, window: IngestionWindow) -> dict[str, Any]:
-        return {
-            "event_time_floor": _clickhouse_time(window.start - timedelta(days=self.config.max_event_age_days)),
-            # Ingestion accepts timestamps up to a day ahead of the time it receives the event.
-            "event_time_ceiling": _clickhouse_time(window.end + timedelta(days=1)),
-            "written_from": _clickhouse_time(window.start),
-            "written_until": _clickhouse_time(window.end),
-        }
+        return window_query_args(window, self.config.max_event_age_days)
+
+
+def window_query_args(window: IngestionWindow, max_event_age_days: int) -> dict[str, Any]:
+    """The arguments of AFFECTED_EVENT_FILTER for one window."""
+    return {
+        "event_time_floor": _clickhouse_time(window.start - timedelta(days=max_event_age_days)),
+        # Ingestion accepts timestamps up to a day ahead of the time it receives the event.
+        "event_time_ceiling": _clickhouse_time(window.end + timedelta(days=1)),
+        "written_from": _clickhouse_time(window.start),
+        "written_until": _clickhouse_time(window.end),
+    }
 
 
 def _clickhouse_time(value: datetime) -> str:
@@ -237,11 +242,11 @@ class ShardStagingTotals:
     no_match: int
 
 
-def plan_windows(config: GeoipBackfillConfig, now: datetime) -> tuple[IngestionWindow, ...]:
-    if not config.windows:
+def plan_windows(configs: Sequence[IngestionWindowConfig], now: datetime) -> tuple[IngestionWindow, ...]:
+    if not configs:
         raise dagster.Failure(description="Give at least one window.")
     windows = []
-    for window in config.windows:
+    for window in configs:
         start = _parse_utc(window.start)
         end = _parse_utc(window.end)
         if start >= end:
@@ -332,7 +337,7 @@ def on_shard_host(
 
 @dagster.op(tags=OWNER_TAG)
 def plan_geoip_backfill(context: dagster.OpExecutionContext, config: GeoipBackfillConfig) -> StagingPlan:
-    windows = plan_windows(config, datetime.now(UTC))
+    windows = plan_windows(config.windows, datetime.now(UTC))
     if not Path(config.mmdb_path).is_file():
         raise dagster.Failure(description=f"No MMDB at {config.mmdb_path}.")
     for window in windows:
@@ -352,7 +357,7 @@ def find_affected_teams(
     `anonymize_ips` has no `$ip` on its events, so it never matches the filter.
     """
     team_filter = _TEAM_FILTER if plan.config.team_ids else ""
-    query = f"SELECT team_id, count() FROM {EVENTS_DATA_TABLE()} WHERE {_AFFECTED_EVENT_FILTER}{team_filter} GROUP BY team_id"
+    query = f"SELECT team_id, count() FROM {EVENTS_DATA_TABLE()} WHERE {AFFECTED_EVENT_FILTER}{team_filter} GROUP BY team_id"
     workload, node_role = shard_workload()
     query_tags = dagster_tags(context)
     counts: Counter[int] = Counter()
@@ -480,7 +485,7 @@ class ShardStaging:
         query = f"""
             SELECT {", ".join(column.quoted for column in columns)}
             FROM {EVENTS_DATA_TABLE()}
-            WHERE {_AFFECTED_EVENT_FILTER}{_TEAM_FILTER}
+            WHERE {AFFECTED_EVENT_FILTER}{_TEAM_FILTER}
             {"LIMIT %(limit)s" if can_split else ""}
         """
         args = {**self.plan.query_args(time_slice), "team_ids": team_ids, "limit": limit + 1}
