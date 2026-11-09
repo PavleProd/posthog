@@ -29,6 +29,7 @@ import type {
     ForgetRequestApi,
     ForgetResponseApi,
     InboxOnboardingDraftApi,
+    InboxOnboardingExposureApi,
     InboxOnboardingStateApi,
     InboxSummaryApi,
     LighthouseAuditRequestApi,
@@ -466,11 +467,14 @@ export const getSignalsOnboardingExposeCreateUrl = (projectId: string) => {
 
 export const signalsOnboardingExposeCreate = async (
     projectId: string,
+    inboxOnboardingExposureApi?: InboxOnboardingExposureApi,
     options?: RequestInit
 ): Promise<InboxOnboardingStateApi> => {
     return apiMutator<InboxOnboardingStateApi>(getSignalsOnboardingExposeCreateUrl(projectId), {
         ...options,
         method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...options?.headers },
+        body: JSON.stringify(inboxOnboardingExposureApi),
     })
 }
 
