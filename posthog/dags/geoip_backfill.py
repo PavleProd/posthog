@@ -61,6 +61,8 @@ AFFECTED_EVENT_FILTER = """
 
 _TEAM_FILTER = " AND team_id IN %(team_ids)s"
 
+STAGING_EXTRA_COLUMNS = ("original_properties", "original_person_properties", "original_written_at")
+
 
 class IngestionWindowConfig(dagster.Config):
     start: str = pydantic.Field(description="First Kafka write time (`_timestamp`) to repair, ISO 8601, UTC.")
@@ -163,8 +165,9 @@ class GeoipStagingTable:
     """The enriched rows of one run, on each shard of the events cluster.
 
     The table holds the plain (no DEFAULT, no MATERIALIZED) columns of `sharded_events` under the same
-    sort key and version column, so a row and its original collapse in a ReplacingMergeTree. Two extra
-    columns keep the original JSON for a rollback.
+    sort key and version column, so a row and its original collapse in a ReplacingMergeTree. The extra
+    columns keep the original JSON for a rollback, and the original `_timestamp`, which the staged copy
+    replaces with the staging time.
     """
 
     id: uuid.UUID
@@ -185,7 +188,8 @@ class GeoipStagingTable:
             CREATE TABLE IF NOT EXISTS {self.qualified_name} (
                 {column_sql},
                 original_properties String,
-                original_person_properties String
+                original_person_properties String,
+                original_written_at DateTime
             )
             ENGINE = {engine}
             PARTITION BY toYYYYMM(timestamp)
@@ -201,11 +205,11 @@ class GeoipStagingTable:
         return count > 0
 
     def columns(self, client: Client) -> list[EventColumn]:
-        """The event columns of the table, without the two rollback columns."""
+        """The event columns of the table, without the extra columns."""
         return [
             column
             for column in read_columns(client, self.name, plain_only=False)
-            if column.name not in ("original_properties", "original_person_properties")
+            if column.name not in STAGING_EXTRA_COLUMNS
         ]
 
     def drop(self, client: Client) -> None:
@@ -276,6 +280,7 @@ def enrich_row(
     staged["_timestamp"] = staged_at
     staged["original_properties"] = row["properties"]
     staged["original_person_properties"] = row["person_properties"]
+    staged["original_written_at"] = row["_timestamp"]
     return staged, enrichment
 
 
@@ -507,7 +512,7 @@ class ShardStaging:
         return [dict(zip(names, row)) for row in rows]
 
     def _insert(self, columns: Sequence[EventColumn], rows: Sequence[Mapping[str, Any]]) -> None:
-        names = [*(column.name for column in columns), "original_properties", "original_person_properties"]
+        names = [*(column.name for column in columns), *STAGING_EXTRA_COLUMNS]
         query = f"INSERT INTO {self.table.qualified_name} ({', '.join(f'`{name}`' for name in names)}) VALUES"
         values = [tuple(row[name] for name in names) for row in rows]
 

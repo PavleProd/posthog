@@ -102,12 +102,15 @@ def run_staging(
         )
 
 
-def staged_rows(cluster: ClickhouseCluster, table: GeoipStagingTable) -> dict[UUID, tuple[dict, dict, str]]:
+def staged_rows(cluster: ClickhouseCluster, table: GeoipStagingTable) -> dict[UUID, tuple[dict, dict, str, datetime]]:
     rows = cluster.any_host_by_role(
-        Query(f"SELECT uuid, properties, person_properties, original_properties FROM {table.qualified_name} FINAL"),
+        Query(
+            f"""SELECT uuid, properties, person_properties, original_properties, original_written_at
+            FROM {table.qualified_name} FINAL"""
+        ),
         NodeRole.DATA,
     ).result()
-    return {row[0]: (json.loads(row[1]), json.loads(row[2]), row[3]) for row in rows}
+    return {row[0]: (json.loads(row[1]), json.loads(row[2]), row[3], row[4]) for row in rows}
 
 
 @pytest.mark.django_db
@@ -171,7 +174,7 @@ def test_staging_holds_enriched_copies_of_the_events_written_without_geoip(
     try:
         staged = staged_rows(cluster, table)
         assert set(staged) == {damaged.uuid, second_damaged.uuid}
-        properties, person_properties, original_properties = staged[damaged.uuid]
+        properties, person_properties, original_properties, original_written_at = staged[damaged.uuid]
         assert properties["$geoip_country_code"] == "US"
         assert properties["$set"]["email"] == "user@example.com"
         assert properties["$set"]["$geoip_country_code"] == "US"
@@ -180,6 +183,7 @@ def test_staging_holds_enriched_copies_of_the_events_written_without_geoip(
         assert person_properties["$geoip_country_code"] == "US"
         assert person_properties["$initial_geoip_country_code"] == "FR"
         assert json.loads(original_properties) == damaged.properties
+        assert original_written_at.replace(tzinfo=UTC) == now - timedelta(minutes=damaged.written_minutes_ago)
         assert staged[second_damaged.uuid][1] == {}
     finally:
         cluster.map_hosts_by_role(table.drop, NodeRole.DATA).result()
