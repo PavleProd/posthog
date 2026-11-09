@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
-use common_kafka_consumer::{Charge, Offset, TopicPartition};
+use common_kafka_consumer::{Charge, Offset, Partition, TopicOffsetLedger, TopicPartition};
 
 use crate::debug_recorder::{PartitionOffset, PartitionOffsets};
+use crate::ledger_rejection::{report_rejection, RejectedSlice};
 use crate::order_sentinel::OffsetSpan;
+use crate::settlement::Settlement;
 use crate::types::Accumulator;
 
 #[derive(Default)]
@@ -73,6 +75,66 @@ pub(crate) struct CollectedBatch {
 pub(crate) struct InFlightPoll {
     pub(crate) partitions: HashMap<TopicPartition, PartitionDeliveries>,
     pub(crate) uncommitted: HashMap<TopicPartition, Charge>,
+}
+
+pub(crate) struct ChargedPoll {
+    /// Holds no message the ledger dropped as redelivered.
+    pub(crate) accumulator: Accumulator,
+    pub(crate) poll: InFlightPoll,
+    pub(crate) stats: BatchStats,
+    pub(crate) generations: HashMap<Partition, u64>,
+    pub(crate) to_pause: Vec<TopicPartition>,
+}
+
+impl CollectedBatch {
+    /// Fails on a ledger violation.
+    pub(crate) fn charge(
+        self,
+        ledger: &TopicOffsetLedger,
+        settlement: &impl Settlement,
+    ) -> anyhow::Result<ChargedPoll> {
+        let CollectedBatch {
+            mut accumulator,
+            mut partitions,
+            stats,
+        } = self;
+        let mut uncommitted = HashMap::with_capacity(partitions.len());
+        let mut generations = HashMap::with_capacity(partitions.len());
+        let mut to_pause = Vec::new();
+        // One ledger call per partition keeps the lock and the gauge labels
+        // off the per-message path.
+        for (topic_partition, partition) in &mut partitions {
+            partition.generation = ledger.generation(topic_partition);
+            generations.insert(Partition(topic_partition.partition), partition.generation);
+            match settlement.charge(topic_partition, partition.generation, &partition.charges) {
+                Ok(charged) => {
+                    for &offset in &charged.redelivered {
+                        accumulator.remove_last(Partition(topic_partition.partition), offset);
+                    }
+                    if charged.pause.is_some() {
+                        to_pause.push(topic_partition.clone());
+                    }
+                    uncommitted.insert(topic_partition.clone(), charged.uncommitted);
+                }
+                Err(rejection) => report_rejection(
+                    "charge",
+                    topic_partition,
+                    rejection,
+                    RejectedSlice::charged(&partition.charges),
+                )?,
+            }
+        }
+        Ok(ChargedPoll {
+            accumulator,
+            poll: InFlightPoll {
+                partitions,
+                uncommitted,
+            },
+            stats,
+            generations,
+            to_pause,
+        })
+    }
 }
 
 /// Per-partition max offset + observed lag for the debug UI's batch events.

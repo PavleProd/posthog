@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use metrics::counter;
 use tracing::warn;
@@ -15,6 +16,9 @@ const STALE_SLICES: &str = "kafka_consumer_ledger_stale_slices_total";
 const ERRORS: &str = "kafka_consumer_ledger_errors_total";
 /// Offsets a frontier commit walked over that Kafka never delivered.
 const GAP_OFFSETS: &str = "kafka_consumer_ledger_gap_offsets_total";
+/// Offsets delivered again inside the window of one generation, and dropped.
+const REDELIVERED_OFFSETS: &str = "kafka_consumer_ledger_redelivered_offsets_total";
+const REDELIVERY_WARN_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A partition of a named topic, the key for everything the ledger tracks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -30,6 +34,13 @@ impl TopicPartition {
             partition,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChargedSlice {
+    pub held: Held,
+    /// The caller must drop these messages: their first delivery is charged.
+    pub redelivered: Vec<Offset>,
 }
 
 /// Why a charge or settlement did not land on its partition's ledger.
@@ -60,10 +71,12 @@ pub enum Rejection {
 /// generation is stale. Generations are independent per partition, so one
 /// partition's reassignment never affects another's in-flight work.
 ///
-/// The ledger counts its rejections and the gap offsets a take walks over.
+/// The ledger counts its rejections, its redeliveries, and the gap offsets a
+/// take walks over.
 #[derive(Default)]
 pub struct TopicOffsetLedger {
     partitions: Mutex<HashMap<TopicPartition, PartitionOffsetLedger>>,
+    redelivery_warned_at: Mutex<Option<Instant>>,
 }
 
 impl TopicOffsetLedger {
@@ -84,14 +97,14 @@ impl TopicOffsetLedger {
 
     /// Record one slice of delivered offsets on the partition's ledger,
     /// founding the ledger when the slice is the partition's first delivery.
-    /// Returns what the partition's window holds after the charge, or why
-    /// the slice was rejected.
+    /// Returns what the partition's window holds after the charge and the
+    /// redelivered offsets it dropped, or why the slice was rejected.
     pub fn charge(
         &self,
         topic_partition: &TopicPartition,
         stamp: u64,
         offset_charges: impl IntoIterator<Item = (Offset, Charge)>,
-    ) -> Result<Held, Rejection> {
+    ) -> Result<ChargedSlice, Rejection> {
         let result = {
             let mut partitions = self.partitions.lock().unwrap();
             let ledger = partitions
@@ -102,7 +115,10 @@ impl TopicOffsetLedger {
                 Err(Rejection::Stale { stamp, generation })
             } else {
                 match ledger.charge(offset_charges) {
-                    Ok(_) => Ok(ledger.held()),
+                    Ok(redelivered) => Ok(ChargedSlice {
+                        held: ledger.held(),
+                        redelivered,
+                    }),
                     Err(error) => {
                         let held = ledger.held();
                         *ledger = PartitionOffsetLedger::new(generation + 1);
@@ -116,10 +132,39 @@ impl TopicOffsetLedger {
                 }
             }
         };
-        if let Err(rejection) = result {
-            count_rejection("charge", rejection);
+        match &result {
+            Ok(charged) => self.report_redelivered(topic_partition, stamp, &charged.redelivered),
+            Err(rejection) => count_rejection("charge", *rejection),
         }
         result
+    }
+
+    fn report_redelivered(
+        &self,
+        topic_partition: &TopicPartition,
+        stamp: u64,
+        redelivered: &[Offset],
+    ) {
+        let Some(first) = redelivered.first() else {
+            return;
+        };
+        let (topic, partition) = labels(topic_partition);
+        counter!(REDELIVERED_OFFSETS, "topic" => topic, "partition" => partition)
+            .increment(redelivered.len() as u64);
+        let now = Instant::now();
+        let mut warned_at = self.redelivery_warned_at.lock().unwrap();
+        if warned_at.is_some_and(|at| now.duration_since(at) < REDELIVERY_WARN_INTERVAL) {
+            return;
+        }
+        *warned_at = Some(now);
+        warn!(
+            topic = %topic_partition.topic,
+            partition = topic_partition.partition,
+            batch_generation = stamp,
+            offset = first.0,
+            redelivered = redelivered.len(),
+            "Offset ledger dropped offsets Kafka delivered again"
+        );
     }
 
     /// Settle one batch's offsets, stamped with the generation they were
@@ -196,8 +241,8 @@ impl TopicOffsetLedger {
 
     /// Start a new generation for each partition, dropping its ledger. Called
     /// when a partition is revoked or assigned: Kafka redelivers it from the
-    /// committed offset, which a kept ledger would reject as duplicate
-    /// delivery, and work still in flight from the old assignment must not
+    /// committed offset, which a kept ledger would reject or drop as a
+    /// redelivery, and work still in flight from the old assignment must not
     /// land on the new one.
     pub fn forget_partitions<'a>(
         &self,
@@ -256,6 +301,8 @@ fn labels(topic_partition: &TopicPartition) -> (Arc<str>, Arc<str>) {
 
 #[cfg(test)]
 mod tests {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
     use super::*;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
@@ -320,7 +367,7 @@ mod tests {
         assert_eq!(
             ledger
                 .charge(&p0, 1, [(Offset(10), Charge::ZERO)])
-                .map(|held| held.offsets),
+                .map(|charged| charged.held.offsets),
             Ok(1)
         );
     }
@@ -564,7 +611,7 @@ mod tests {
         assert_eq!(
             ledger
                 .charge(&p0, 2, [(Offset(10), Charge::ZERO)])
-                .map(|held| held.offsets),
+                .map(|charged| charged.held.offsets),
             Ok(1)
         );
     }
@@ -573,19 +620,19 @@ mod tests {
     fn a_violating_charge_resets_the_partition_to_a_new_generation() {
         let ledger = TopicOffsetLedger::new();
         let p0 = tp("events", 0);
-        charge(&ledger, &p0, 0, &[10, 11]);
+        charge(&ledger, &p0, 0, &[10, 12]);
 
         assert_eq!(
             ledger.charge(&p0, 0, [(Offset(11), Charge::ZERO)]),
             Err(Rejection::Violation {
                 error: LedgerError::OffsetNotAboveWindow {
                     offset: Offset(11),
-                    next: Offset(12),
+                    next: Offset(13),
                 },
                 stamp: 0,
                 generation: 0,
                 held: Held {
-                    offsets: 2,
+                    offsets: 3,
                     charge: Charge::ZERO
                 },
             })
@@ -602,9 +649,49 @@ mod tests {
         );
         assert_eq!(
             ledger
-                .charge(&p0, 1, [(Offset(12), Charge::ZERO)])
-                .map(|held| held.offsets),
+                .charge(&p0, 1, [(Offset(13), Charge::ZERO)])
+                .map(|charged| charged.held.offsets),
             Ok(1)
+        );
+    }
+
+    #[test]
+    fn a_redelivery_is_counted_and_keeps_the_partitions_generation() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let ledger = TopicOffsetLedger::new();
+        let p0 = tp("events", 0);
+        charge(&ledger, &p0, 0, &[10, 11]);
+
+        let charged = ledger
+            .charge(
+                &p0,
+                0,
+                [11, 11, 12].map(|offset| (Offset(offset), Charge::ZERO)),
+            )
+            .expect("a redelivery is not a violation");
+
+        assert_eq!(charged.redelivered, vec![Offset(11), Offset(11)]);
+        assert_eq!(charged.held.offsets, 3);
+        assert_eq!(ledger.generation(&p0), 0);
+        let counted: Vec<(String, u64)> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| match value {
+                DebugValue::Counter(count) => Some((key.key().name().to_string(), count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counted, vec![(REDELIVERED_OFFSETS.to_string(), 2)]);
+
+        ledger
+            .settle(&p0, 0, [Offset(10), Offset(11), Offset(12)])
+            .expect("each offset completes once");
+        assert_eq!(
+            ledger.take_frontier(&p0).map(|taken| taken.offset),
+            Some(Offset(13))
         );
     }
 

@@ -36,13 +36,14 @@ impl<A: Accounting + 'static, D: Admission + 'static> Settlement for GroupSettle
         generation: u64,
         charges: &[(Offset, Charge)],
     ) -> Result<Charged, Rejection> {
-        let uncommitted = self
+        let charged = self
             .accounting
-            .charge(topic_partition, generation, charges)?
-            .charge;
+            .charge(topic_partition, generation, charges)?;
+        let uncommitted = charged.held.charge;
         Ok(Charged {
             uncommitted,
             pause: self.admission.charged(topic_partition, uncommitted),
+            redelivered: charged.redelivered,
         })
     }
 

@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_kafka_consumer::{
-    AssignmentEpoch, Offset, Partition, TopicOffsetLedger, TopicPartition,
-};
+use common_kafka_consumer::{AssignmentEpoch, Offset, TopicOffsetLedger, TopicPartition};
 use lifecycle::Handle;
 use metrics::{counter, gauge, histogram};
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
@@ -20,11 +18,10 @@ use crate::config::Config;
 use crate::debug_recorder::{record_if, CommitOffset, DebugEventKind, DebugRecorder};
 use crate::discovery::DiscoveryMode;
 use crate::grpc_transport::GrpcTransport;
-use crate::ledger_rejection::{report_rejection, RejectedSlice};
 use crate::partition_budget::BudgetLimits;
 use crate::polling::{
-    debug_partition_offsets, debug_partition_spans, BatchStats, CollectedBatch, ContinuousPolling,
-    InFlightPoll, PartitionDeliveries, Parts, PollLimits, PollingStrategy, Step,
+    debug_partition_offsets, debug_partition_spans, BatchStats, ChargedPoll, CollectedBatch,
+    ContinuousPolling, InFlightPoll, PartitionDeliveries, Parts, PollLimits, PollingStrategy, Step,
 };
 use crate::rebalance::{
     partition_error, partition_names, Drain, Event, RebalanceContext, Unassign,
@@ -549,42 +546,23 @@ impl IngestionConsumer {
     }
 
     fn submit_poll(&self, collected: CollectedBatch) -> anyhow::Result<InFlightPoll> {
-        let CollectedBatch {
+        let ChargedPoll {
             accumulator,
-            mut partitions,
+            poll,
             stats,
-        } = collected;
-        let mut uncommitted = HashMap::with_capacity(partitions.len());
-        let mut generations = HashMap::with_capacity(partitions.len());
-        // One ledger call per partition keeps the lock and the gauge labels
-        // off the per-message path.
-        for (topic_partition, partition) in &mut partitions {
-            partition.generation = self.topic_offset_ledger.generation(topic_partition);
-            generations.insert(Partition(topic_partition.partition), partition.generation);
-            match self
-                .settlement
-                .charge(topic_partition, partition.generation, &partition.charges)
-            {
-                Ok(charged) => {
-                    if charged.pause.is_some() {
-                        self.pause_partition(topic_partition);
-                    }
-                    uncommitted.insert(topic_partition.clone(), charged.uncommitted);
-                }
-                Err(rejection) => report_rejection(
-                    "charge",
-                    topic_partition,
-                    rejection,
-                    RejectedSlice::charged(&partition.charges),
-                )?,
-            }
+            generations,
+            to_pause,
+        } = collected.charge(&self.topic_offset_ledger, &*self.settlement)?;
+        for topic_partition in &to_pause {
+            self.pause_partition(topic_partition);
         }
+        let partitions = &poll.partitions;
 
         let message_count = accumulator.message_count();
         let poll_id = make_batch_id();
         emit_poll_stats(
             &stats,
-            &partitions,
+            partitions,
             message_count,
             &self.group_id,
             self.batch_size,
@@ -595,9 +573,9 @@ impl IngestionConsumer {
         record_if(&self.debug_recorder, || DebugEventKind::BatchDispatched {
             batch_id: poll_id.clone(),
             messages: message_count,
-            partitions: debug_partition_offsets(&partitions),
+            partitions: debug_partition_offsets(partitions),
             assignment_epoch,
-            spans: debug_partition_spans(&partitions),
+            spans: debug_partition_spans(partitions),
         });
 
         info!(
@@ -606,10 +584,7 @@ impl IngestionConsumer {
             "Kafka batch dispatched"
         );
 
-        Ok(InFlightPoll {
-            partitions,
-            uncommitted,
-        })
+        Ok(poll)
     }
 
     fn pause_partition(&self, topic_partition: &TopicPartition) {

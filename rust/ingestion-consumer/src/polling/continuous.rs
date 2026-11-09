@@ -318,6 +318,25 @@ mod tests {
     }
 
     #[test]
+    fn a_redelivered_offset_reaches_the_batcher_once_and_commits_once() {
+        let mut harness = continuous(1_000);
+        harness.receive(0, &[0, 1, 1, 2]);
+        harness.after_the_batch_timeout();
+        harness.submit();
+        harness.receive(0, &[2, 3]);
+        harness.after_the_batch_timeout();
+        harness.submit();
+
+        assert_eq!(
+            harness.batched(),
+            [vec![(0, 0), (0, 1), (0, 2)], vec![(0, 3)]]
+        );
+        harness.complete(0, &[0, 1, 2]);
+        harness.complete(0, &[3]);
+        assert_eq!(harness.commit(), HashMap::from([(p(0), Offset(4))]));
+    }
+
+    #[test]
     fn a_revoke_removes_the_partitions_messages_received_before_it() {
         let mut harness = continuous(1_000);
         harness.receive(0, &[10, 11]);

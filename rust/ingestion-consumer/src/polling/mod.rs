@@ -22,8 +22,8 @@ use collector::Collector;
 pub(crate) use collector::PollLimits;
 pub(crate) use continuous::ContinuousPolling;
 pub(crate) use poll::{
-    debug_partition_offsets, debug_partition_spans, BatchStats, CollectedBatch, InFlightPoll,
-    PartitionDeliveries,
+    debug_partition_offsets, debug_partition_spans, BatchStats, ChargedPoll, CollectedBatch,
+    InFlightPoll, PartitionDeliveries,
 };
 
 pub(crate) enum Step {

@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use common_kafka_consumer::{Charge, Held, Offset, Rejection, TopicPartition};
+use common_kafka_consumer::{Charge, ChargedSlice, Held, Offset, Rejection, TopicPartition};
 
 use super::{Accounting, Admission, HandedOut, Pause};
 
@@ -74,8 +74,12 @@ impl Accounting for FakeAccounting {
         _topic_partition: &TopicPartition,
         _generation: u64,
         _charges: &[(Offset, Charge)],
-    ) -> Result<Held, Rejection> {
-        self.charges.next().unwrap_or(Ok(Held::default()))
+    ) -> Result<ChargedSlice, Rejection> {
+        let held = self.charges.next().unwrap_or(Ok(Held::default()))?;
+        Ok(ChargedSlice {
+            held,
+            redelivered: Vec::new(),
+        })
     }
 
     fn settled(

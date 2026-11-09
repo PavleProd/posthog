@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use common_kafka_consumer::{Charge, Held, Offset, Rejection, TopicOffsetLedger, TopicPartition};
+use common_kafka_consumer::{
+    Charge, ChargedSlice, Held, Offset, Rejection, TopicOffsetLedger, TopicPartition,
+};
 use metrics::gauge;
 
 use super::{Accounting, HandedOut};
@@ -48,13 +50,16 @@ impl Accounting for Uncommitted {
         topic_partition: &TopicPartition,
         generation: u64,
         charges: &[(Offset, Charge)],
-    ) -> Result<Held, Rejection> {
-        let held = self
+    ) -> Result<ChargedSlice, Rejection> {
+        let charged = self
             .ledger
             .charge(topic_partition, generation, charges.iter().copied())?;
-        let uncommitted = held + self.pacer.lock().unwrap().pending(topic_partition);
+        let uncommitted = charged.held + self.pacer.lock().unwrap().pending(topic_partition);
         publish(topic_partition, uncommitted);
-        Ok(uncommitted)
+        Ok(ChargedSlice {
+            held: uncommitted,
+            redelivered: charged.redelivered,
+        })
     }
 
     fn settled(
@@ -190,6 +195,7 @@ mod tests {
         uncommitted
             .charge(&p0(), generation, &[(Offset(offset), EACH)])
             .expect("the ledger accepts the charge")
+            .held
     }
 
     fn settled(uncommitted: &Uncommitted, offsets: &[i64]) {
@@ -240,6 +246,7 @@ mod tests {
             uncommitted
                 .charge(&p1, 0, &[(Offset(offset), EACH)])
                 .expect("the ledger accepts the charge")
+                .held
         };
         charge(&uncommitted, 0, 10);
         charge_p1(20);

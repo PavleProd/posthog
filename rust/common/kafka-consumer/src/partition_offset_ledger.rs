@@ -19,7 +19,7 @@ struct Slot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerError {
     /// A charge delivered an offset that is not above every offset already
-    /// recorded.
+    /// recorded, and is not a redelivery of a charged offset in the window.
     OffsetNotAboveWindow { offset: Offset, next: Offset },
     /// A completion arrived before any delivery was charged.
     CompletionBeforeDelivery { offset: Offset },
@@ -115,8 +115,8 @@ impl AddAssign for Held {
 ///
 /// A ledger lives for one partition assignment: create it on assign, drop it
 /// on revoke. Kafka redelivers a partition from its committed offset after a
-/// rebalance, so a ledger kept across assignments sees the redelivery as
-/// duplicate delivery and rejects it. Completions from a previous
+/// rebalance, and a ledger kept across assignments would reject or drop that
+/// redelivery. Completions from a previous
 /// assignment's in-flight work must be discarded before they reach the new
 /// ledger; it never charged those offsets and rejects them too. Both come
 /// back as a [`LedgerError`]: the ledger never panics, so an owner holding
@@ -158,22 +158,26 @@ impl PartitionOffsetLedger {
         self.generation
     }
 
-    /// Record offsets in delivery order and return their total charge. An
-    /// offset gap (transaction control records) never blocks the frontier and
-    /// carries no charge.
+    /// Record offsets in delivery order. An offset gap (transaction control
+    /// records) never blocks the frontier and carries no charge.
     ///
-    /// Fails when an offset is not above every offset already recorded.
-    /// Duplicate or out-of-order delivery is a caller bug, and recording it
+    /// Returns, once per redelivery, the offsets the window already holds as
+    /// delivered, without recording them; the caller drops those messages.
+    /// Fails on any other offset not above the window, because recording it
     /// would corrupt the commit accounting.
     pub fn charge(
         &mut self,
         offset_charges: impl IntoIterator<Item = (Offset, Charge)>,
-    ) -> Result<Charge, LedgerError> {
-        let mut total = Charge::ZERO;
+    ) -> Result<Vec<Offset>, LedgerError> {
+        let mut redelivered = Vec::new();
         for (offset, charge) in offset_charges {
             let base_offset = *self.base_offset.get_or_insert(offset);
             let next_offset = base_offset + self.slots.len();
             if offset < next_offset {
+                if self.holds_delivered(base_offset, offset) {
+                    redelivered.push(offset);
+                    continue;
+                }
                 return Err(LedgerError::OffsetNotAboveWindow {
                     offset,
                     next: next_offset,
@@ -193,10 +197,16 @@ impl PartitionOffsetLedger {
                 charge,
                 delivered: true,
             });
-            total += charge;
             self.held_charge += charge;
         }
-        Ok(total)
+        Ok(redelivered)
+    }
+
+    fn holds_delivered(&self, base_offset: Offset, offset: Offset) -> bool {
+        usize::try_from(offset - base_offset)
+            .ok()
+            .and_then(|slot_index| self.slots.get(slot_index))
+            .is_some_and(|slot| slot.delivered)
     }
 
     /// Mark delivered offsets complete in any order.
@@ -319,14 +329,69 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_delivery_is_rejected() {
+    fn a_redelivery_inside_the_window_is_returned_and_not_recorded() {
+        let mut ledger = PartitionOffsetLedger::new(1);
+        ledger.charge([charge(0), charge(1), charge(2)]).unwrap();
+        ledger.complete([Offset(0)]).unwrap();
+        ledger.take_frontier().unwrap();
+
+        assert_eq!(
+            ledger.charge([charge(1), charge(2), charge(2)]),
+            Ok(vec![Offset(1), Offset(2), Offset(2)])
+        );
+        assert_eq!(
+            ledger.held(),
+            Held {
+                offsets: 2,
+                charge: Charge {
+                    events: 2,
+                    bytes: 20
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn a_redelivery_followed_by_new_offsets_keeps_the_frontier() {
         let mut ledger = PartitionOffsetLedger::new(1);
         ledger.charge([charge(0), charge(1)]).unwrap();
         assert_eq!(
-            ledger.charge([charge(1)]),
+            ledger.charge([charge(1), charge(2), charge(3)]),
+            Ok(vec![Offset(1)])
+        );
+        ledger
+            .complete([Offset(0), Offset(1), Offset(2), Offset(3)])
+            .unwrap();
+        let taken = ledger.take_frontier().unwrap();
+        assert_eq!(taken.offset, Offset(4));
+        assert_eq!(taken.charge.events, 4);
+        assert_eq!(taken.gap_offset_count, 0);
+    }
+
+    #[test]
+    fn an_offset_below_the_window_base_is_rejected() {
+        let mut ledger = PartitionOffsetLedger::new(1);
+        ledger.charge([charge(0), charge(1)]).unwrap();
+        ledger.complete([Offset(0)]).unwrap();
+        ledger.take_frontier().unwrap();
+        assert_eq!(
+            ledger.charge([charge(0)]),
             Err(LedgerError::OffsetNotAboveWindow {
-                offset: Offset(1),
+                offset: Offset(0),
                 next: Offset(2),
+            })
+        );
+    }
+
+    #[test]
+    fn an_out_of_order_offset_that_was_never_delivered_is_rejected() {
+        let mut ledger = PartitionOffsetLedger::new(1);
+        ledger.charge([charge(0), charge(3)]).unwrap();
+        assert_eq!(
+            ledger.charge([charge(2)]),
+            Err(LedgerError::OffsetNotAboveWindow {
+                offset: Offset(2),
+                next: Offset(4),
             })
         );
     }

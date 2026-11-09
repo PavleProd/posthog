@@ -9,7 +9,7 @@ mod uncommitted;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use common_kafka_consumer::{Charge, Held, Offset, Rejection, TopicPartition};
+use common_kafka_consumer::{Charge, ChargedSlice, Held, Offset, Rejection, TopicPartition};
 
 #[cfg(test)]
 use common_kafka_consumer::TopicOffsetLedger;
@@ -49,7 +49,7 @@ pub(crate) trait Accounting: Send + Sync {
         topic_partition: &TopicPartition,
         generation: u64,
         charges: &[(Offset, Charge)],
-    ) -> Result<Held, Rejection>;
+    ) -> Result<ChargedSlice, Rejection>;
     fn settled(
         &self,
         topic_partition: &TopicPartition,
@@ -88,6 +88,7 @@ pub(crate) struct Pause;
 pub(crate) struct Charged {
     pub(crate) uncommitted: Charge,
     pub(crate) pause: Option<Pause>,
+    pub(crate) redelivered: Vec<Offset>,
 }
 
 pub(crate) struct Commit {

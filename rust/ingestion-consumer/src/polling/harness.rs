@@ -8,7 +8,7 @@ use common_kafka_consumer::{
 use tokio::time::Instant;
 
 use super::collector::tests::message;
-use super::{CollectedBatch, InFlightPoll, Parts, PollLimits, PollingStrategy, Step};
+use super::{Parts, PollLimits, PollingStrategy, Step};
 use crate::partition_budget::BudgetLimits;
 use crate::settlement::{GroupSettlement, Settlement};
 
@@ -19,6 +19,7 @@ pub(super) struct Harness<P> {
     pub(super) settlement: Arc<GroupSettlement>,
     pub(super) ledger: Arc<TopicOffsetLedger>,
     pub(super) now: Instant,
+    batched: Vec<Vec<(i32, i64)>>,
 }
 
 impl<P: PollingStrategy> Harness<P> {
@@ -43,6 +44,7 @@ impl<P: PollingStrategy> Harness<P> {
             settlement,
             ledger,
             now: Instant::now(),
+            batched: Vec::new(),
         }
     }
 
@@ -65,17 +67,12 @@ impl<P: PollingStrategy> Harness<P> {
         let Some(Step::Submit(collected)) = self.step() else {
             panic!("expected a poll to submit");
         };
-        let CollectedBatch { mut partitions, .. } = collected;
-        let mut uncommitted = HashMap::new();
-        for (topic_partition, deliveries) in &mut partitions {
-            deliveries.generation = self.ledger.generation(topic_partition);
-            let charged = self
-                .settlement
-                .charge(topic_partition, deliveries.generation, &deliveries.charges)
-                .expect("the ledger accepts the charge");
-            uncommitted.insert(topic_partition.clone(), charged.uncommitted);
-        }
-        let spans = partitions
+        let charged = collected
+            .charge(&self.ledger, &*self.settlement)
+            .expect("the ledger accepts the charge");
+        let spans = charged
+            .poll
+            .partitions
             .iter()
             .map(|(topic_partition, deliveries)| {
                 (
@@ -84,11 +81,25 @@ impl<P: PollingStrategy> Harness<P> {
                 )
             })
             .collect();
-        self.poller.on_submitted(InFlightPoll {
-            partitions,
-            uncommitted,
-        });
+        self.batched.push(
+            charged
+                .accumulator
+                .into_groups()
+                .into_iter()
+                .flat_map(|group| {
+                    group
+                        .messages
+                        .into_iter()
+                        .map(move |message| (group.partition.0, message.offset.0))
+                })
+                .collect(),
+        );
+        self.poller.on_submitted(charged.poll);
         spans
+    }
+
+    pub(super) fn batched(&self) -> &[Vec<(i32, i64)>] {
+        &self.batched
     }
 
     pub(super) fn complete(&mut self, partition: i32, offsets: &[i64]) {
